@@ -1,0 +1,31 @@
+{
+  "name": "gemini-chat-exporter",
+  "description": "Scrape Google Gemini conversations and export them as EPUB or JSON.",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
+    "zip": "wxt zip",
+    "compile": "tsc --noEmit",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "jszip": "3.10.1"
+  },
+  "devDependencies": {
+    "typescript": "5.9.2",
+    "wxt": "0.20.26"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@parcel/watcher",
+      "esbuild",
+      "sharp",
+      "spawn-sync"
+    ]
+  }
+}

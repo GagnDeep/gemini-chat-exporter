@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gemini Chat Exporter — Settings</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="logo">✦</div>
+      <div>
+        <h1>Gemini Chat Exporter</h1>
+        <p class="sub">Settings</p>
+      </div>
+    </header>
+
+    <main>
+      <section class="group">
+        <h2>Full-conversation capture</h2>
+        <label class="row">
+          <input type="checkbox" id="autoScroll" />
+          <span>
+            <strong>Auto-scroll to capture the whole chat</strong>
+            <em>Scrolls a long conversation so virtualized turns are all collected.</em>
+          </span>
+        </label>
+        <label class="field">
+          <span>Scroll delay (ms)</span>
+          <input type="number" id="scrollDelayMs" min="50" max="5000" step="50" />
+          <em>Raise this on slow machines if turns are missed.</em>
+        </label>
+        <label class="field">
+          <span>Max scroll iterations</span>
+          <input type="number" id="maxIterations" min="10" max="2000" step="10" />
+        </label>
+      </section>
+
+      <section class="group">
+        <h2>Sync to web app</h2>
+        <label class="row">
+          <input type="checkbox" id="autoSyncToWebapp" />
+          <span>
+            <strong>Auto-sync scraped chats to the web app</strong>
+            <em>Writes into the companion archive's local database after a scrape.</em>
+          </span>
+        </label>
+        <label class="field">
+          <span>Merge mode</span>
+          <select id="mergeMode">
+            <option value="merge">Merge (keep embeddings, add new turns)</option>
+            <option value="replace">Replace (rebuild the chat each time)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Web app origin</span>
+          <input type="text" id="webappOrigin" placeholder="http://localhost:3000" />
+        </label>
+      </section>
+
+      <div class="actions">
+        <button id="save" class="primary">Save settings</button>
+        <p id="status" class="status"></p>
+      </div>
+    </main>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

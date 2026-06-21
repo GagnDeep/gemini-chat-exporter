@@ -1,0 +1,78 @@
+:root {
+  --bg: #0e0f13;
+  --panel: #171922;
+  --panel-2: #1f2230;
+  --text: #e8eaed;
+  --muted: #9aa0a6;
+  --grad: linear-gradient(135deg, #1a73e8 0%, #673ab7 100%);
+  --border: #2a2d3a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Google Sans", system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.logo {
+  width: 32px; height: 32px;
+  display: grid; place-items: center;
+  border-radius: 8px;
+  background: var(--grad);
+  font-size: 18px; color: white;
+}
+h1 { font-size: 16px; margin: 0; }
+.sub { margin: 2px 0 0; font-size: 11px; color: var(--muted); letter-spacing: .04em; }
+
+main { max-width: 560px; padding: 24px; }
+
+.group {
+  margin-bottom: 24px;
+  padding: 16px 18px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.group h2 {
+  margin: 0 0 14px;
+  font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+}
+
+.row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; cursor: pointer; }
+.row input[type="checkbox"] { margin-top: 3px; width: 16px; height: 16px; accent-color: #673ab7; }
+.row span { display: flex; flex-direction: column; gap: 2px; }
+.row strong { font-size: 13px; font-weight: 600; }
+.row em, .field em { font-style: normal; font-size: 11px; color: var(--muted); }
+
+.field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
+.field > span { font-size: 12px; color: var(--text); }
+.field input, .field select {
+  font-family: inherit; font-size: 13px;
+  padding: 8px 10px;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.field input:focus, .field select:focus { outline: 1px solid #673ab7; }
+
+.actions { display: flex; align-items: center; gap: 14px; }
+button { font-family: inherit; cursor: pointer; border: none; border-radius: 8px; font-size: 13px; }
+.primary {
+  padding: 10px 22px;
+  color: white; font-weight: 600;
+  background: var(--grad);
+}
+.primary:hover { filter: brightness(1.08); }
+
+.status { min-height: 16px; margin: 0; font-size: 12px; color: var(--muted); }
+.status.ok { color: #81c995; }
+.status.err { color: #f28b82; }

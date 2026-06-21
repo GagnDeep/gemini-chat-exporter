@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gemini Chat Exporter</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="logo">✦</div>
+      <div>
+        <h1>Gemini Chat Exporter</h1>
+        <p class="sub">Scrape · EPUB · JSON</p>
+      </div>
+    </header>
+
+    <main>
+      <button id="scrape-full" class="primary">Scrape full chat</button>
+      <button id="scrape" class="secondary full">Scrape visible only</button>
+      <p id="status" class="status"></p>
+
+      <section id="collection">
+        <div class="collection-head">
+          <h2>Collected chats (<span id="count">0</span>)</h2>
+          <button id="clear" class="link" hidden>Clear all</button>
+        </div>
+        <ul id="list" class="list"></ul>
+        <p id="empty" class="empty">No chats yet. Open a Gemini conversation and click “Scrape full chat” (or press Alt+Shift+G).</p>
+      </section>
+
+      <div class="actions actions-grid" id="bulk-actions" hidden>
+        <button id="export-epub" class="secondary">Export all EPUB</button>
+        <button id="export-md" class="secondary">Export Markdown</button>
+        <button id="export-json" class="secondary">Export JSON</button>
+        <button id="sync-all" class="secondary">Sync all to web app</button>
+      </div>
+
+      <div class="footer">
+        <button id="open-options" class="link">Settings</button>
+        <span class="dot">·</span>
+        <button id="open-webapp" class="link">Open web app</button>
+      </div>
+    </main>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

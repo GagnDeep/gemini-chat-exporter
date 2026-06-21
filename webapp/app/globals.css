@@ -1,0 +1,182 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ----------------------------------------------------------------------------
+   Gemini-inspired theme. Neutral reading surface with a blue -> purple accent
+   that echoes Gemini's brand gradient. Light and dark modes.
+---------------------------------------------------------------------------- */
+
+:root {
+  --radius: 0.75rem;
+
+  --background: oklch(0.99 0.003 260);
+  --foreground: oklch(0.22 0.02 270);
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.22 0.02 270);
+
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.22 0.02 270);
+
+  /* Gemini blue */
+  --primary: oklch(0.58 0.2 262);
+  --primary-foreground: oklch(0.99 0.01 260);
+
+  /* Gemini purple */
+  --accent: oklch(0.62 0.19 300);
+  --accent-foreground: oklch(0.99 0.01 300);
+
+  --secondary: oklch(0.96 0.01 265);
+  --secondary-foreground: oklch(0.3 0.03 270);
+
+  --muted: oklch(0.96 0.008 265);
+  --muted-foreground: oklch(0.52 0.02 270);
+
+  --destructive: oklch(0.58 0.22 22);
+  --destructive-foreground: oklch(0.99 0.01 20);
+
+  --border: oklch(0.9 0.01 270);
+  --input: oklch(0.9 0.01 270);
+  --ring: oklch(0.58 0.2 262);
+
+  --gemini-from: oklch(0.6 0.2 258);
+  --gemini-to: oklch(0.58 0.2 305);
+}
+
+.dark {
+  --background: oklch(0.16 0.012 270);
+  --foreground: oklch(0.93 0.01 265);
+
+  --card: oklch(0.2 0.015 270);
+  --card-foreground: oklch(0.93 0.01 265);
+
+  --popover: oklch(0.2 0.015 270);
+  --popover-foreground: oklch(0.93 0.01 265);
+
+  --primary: oklch(0.7 0.16 262);
+  --primary-foreground: oklch(0.18 0.02 265);
+
+  --accent: oklch(0.72 0.15 300);
+  --accent-foreground: oklch(0.18 0.02 300);
+
+  --secondary: oklch(0.26 0.02 270);
+  --secondary-foreground: oklch(0.92 0.01 265);
+
+  --muted: oklch(0.26 0.015 270);
+  --muted-foreground: oklch(0.68 0.02 270);
+
+  --destructive: oklch(0.66 0.19 22);
+  --destructive-foreground: oklch(0.16 0.02 20);
+
+  --border: oklch(0.3 0.02 270);
+  --input: oklch(0.32 0.02 270);
+  --ring: oklch(0.7 0.16 262);
+
+  --gemini-from: oklch(0.72 0.17 258);
+  --gemini-to: oklch(0.7 0.17 305);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+    outline-color: color-mix(in oklch, var(--ring) 50%, transparent);
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* Brand gradient helpers */
+.gemini-gradient {
+  background-image: linear-gradient(135deg, var(--gemini-from), var(--gemini-to));
+}
+.gemini-text {
+  background-image: linear-gradient(120deg, var(--gemini-from), var(--gemini-to));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Rendered Gemini answer HTML (prose-ish, dependency-free) */
+.answer-html { line-height: 1.7; font-size: 0.95rem; }
+.answer-html > *:first-child { margin-top: 0; }
+.answer-html p { margin: 0.75em 0; }
+.answer-html h1, .answer-html h2, .answer-html h3 { font-weight: 600; line-height: 1.3; margin: 1.2em 0 0.5em; }
+.answer-html h1 { font-size: 1.4em; }
+.answer-html h2 { font-size: 1.2em; }
+.answer-html h3 { font-size: 1.05em; }
+.answer-html ul, .answer-html ol { margin: 0.6em 0; padding-left: 1.5em; }
+.answer-html li { margin: 0.3em 0; }
+.answer-html a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+.answer-html code { background: var(--muted); padding: 0.15em 0.35em; border-radius: 4px; font-size: 0.85em; }
+.answer-html pre { background: var(--muted); padding: 0.9em; border-radius: 8px; overflow-x: auto; margin: 1em 0; position: relative; }
+.answer-html pre.has-bar { padding-top: 2.4em; }
+.answer-html pre code { background: transparent; padding: 0; }
+.answer-html pre .code-bar {
+  position: absolute; top: 0; left: 0; right: 0;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.35em 0.7em;
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  border-radius: 8px 8px 0 0;
+  background: color-mix(in oklch, var(--card) 60%, var(--muted));
+}
+.answer-html pre .code-lang { font-size: 0.72em; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-foreground); font-family: var(--font-sans); }
+.answer-html pre .code-copy {
+  font-size: 0.72em; font-family: var(--font-sans); cursor: pointer;
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.1em 0.6em; background: var(--card); color: var(--muted-foreground);
+}
+.answer-html pre .code-copy:hover { color: var(--foreground); border-color: var(--primary); }
+.answer-html table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.9em; }
+.answer-html th, .answer-html td { border: 1px solid var(--border); padding: 0.5em 0.7em; text-align: left; }
+.answer-html blockquote { border-left: 3px solid var(--accent); padding-left: 1em; margin: 1em 0; color: var(--muted-foreground); }
+
+mark.hl { background: color-mix(in oklch, var(--gemini-to) 35%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; }
+
+/* Accessibility helpers */
+.skip-link {
+  position: absolute; left: -999px; top: 0; z-index: 50;
+  padding: 0.5em 1em; background: var(--primary); color: var(--primary-foreground);
+  border-radius: 0 0 8px 0;
+}
+.skip-link:focus { left: 0; }
+:where(a, button, input, [tabindex]):focus-visible {
+  outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
