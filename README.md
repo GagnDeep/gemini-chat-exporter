@@ -34,6 +34,28 @@ from the extension import cleanly into the web app.
 
 Built with **WXT 0.20** + TypeScript, Manifest V3.
 
+### Install from a release (recommended — no build needed)
+
+A pre-built, packaged extension is attached to every
+[GitHub Release](https://github.com/GagnDeep/gemini-chat-exporter/releases/latest).
+
+1. Go to the [latest release](https://github.com/GagnDeep/gemini-chat-exporter/releases/latest)
+   and download `gemini-chat-exporter-<version>-chrome.zip` from the **Assets** section.
+2. **Unzip** it. You'll get a folder containing `manifest.json` and the extension files.
+3. Open `chrome://extensions` in Chrome (or any Chromium browser: Edge, Brave, Arc…).
+4. Toggle **Developer mode** on (top-right).
+5. Click **Load unpacked** and select the **unzipped folder** (the one with
+   `manifest.json` at its root).
+6. The **Gemini Chat Exporter** icon appears in your toolbar — pin it for quick access.
+
+> Chrome may warn that you're running an unpacked/developer extension. That's
+> expected for extensions installed outside the Web Store; it stays loaded as long
+> as you keep the unzipped folder in place.
+
+To update later, download the newer release zip, unzip it (replacing the old
+folder), and click the **↻ reload** button on the extension's card in
+`chrome://extensions`.
+
 ### What it does
 - **Scrape this chat** — reads the conversation currently open on
   `gemini.google.com`, pulling each user prompt and Gemini's answer (plain text +
