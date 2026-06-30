@@ -96,6 +96,16 @@ function conversationId(): string {
   return parts[parts.length - 1] || `chat-${Date.now()}`;
 }
 
+/** Best-known {id, title, url} for the open conversation, before a full scrape. */
+export function getConversationMeta(): { id: string; title: string; url: string } {
+  const pageTitle = document.title.replace(/\s*-\s*Google Gemini\s*$/i, "").trim();
+  const firstQEl = firstMatch(document.body, QUESTION_SELECTORS);
+  const firstQ = firstQEl ? cleanQuestion((firstQEl as HTMLElement).innerText) : "";
+  let title = pageTitle && !/^gemini$/i.test(pageTitle) ? pageTitle : firstQ || "Untitled chat";
+  if (title.length > 80) title = title.slice(0, 77) + "…";
+  return { id: conversationId(), title, url: location.href };
+}
+
 // ---------------------------------------------------------------------------
 // Turn identity
 // ---------------------------------------------------------------------------
@@ -332,16 +342,46 @@ export interface ScrapeOptions {
   stableRounds?: number;
   /** Progress callback. */
   onProgress?: (info: { turns: number; iteration: number; atTop: boolean; loading: boolean }) => void;
+  /**
+   * Periodic partial-result callback. Fired (throttled by `snapshotIntervalMs`)
+   * with the conversation captured *so far*, so the caller can persist progress
+   * incrementally and never lose work if the scrape is interrupted.
+   */
+  onSnapshot?: (chat: Chat) => void;
+  /** Minimum gap between `onSnapshot` calls. */
+  snapshotIntervalMs?: number;
 }
 
-const SCRAPE_DEFAULTS: Required<Omit<ScrapeOptions, "onProgress">> = {
+const SCRAPE_DEFAULTS: Required<Omit<ScrapeOptions, "onProgress" | "onSnapshot">> = {
   scrollDelayMs: 350,
   stepFraction: 0.7,
   maxIterations: 1000,
   maxDurationMs: 300_000,
   loadWaitMs: 12_000,
   stableRounds: 3,
+  snapshotIntervalMs: 4000,
 };
+
+/** Build a Chat object from the accumulated ordered keys + per-turn data. */
+function buildChat(ordered: string[], data: Map<string, TurnData>): Chat {
+  const turns: ChatTurn[] = ordered.map((key, i) => {
+    const d = data.get(key)!;
+    return {
+      index: i,
+      key,
+      question: d.question,
+      answerText: d.answerText,
+      answerHtml: d.answerHtml,
+    };
+  });
+  return {
+    id: conversationId(),
+    title: deriveTitle(turns),
+    url: location.href,
+    scrapedAt: new Date().toISOString(),
+    turns,
+  };
+}
 
 interface TurnData {
   question: string;
@@ -400,9 +440,24 @@ export async function scrapeFullChat(opts: ScrapeOptions = {}): Promise<Chat> {
 
   const data = new Map<string, TurnData>();
   let ordered: string[] = [];
+  let lastSnapshot = 0;
 
   const scan = () => {
     ordered = stitchOrder(ordered, captureRendered(data));
+  };
+
+  const maybeSnapshot = () => {
+    if (!cfg.onSnapshot) return;
+    const t = Date.now();
+    if (t - lastSnapshot < cfg.snapshotIntervalMs) return;
+    lastSnapshot = t;
+    if (ordered.length) {
+      try {
+        cfg.onSnapshot(buildChat(ordered, data));
+      } catch {
+        /* persistence is best-effort; never let it abort the scrape */
+      }
+    }
   };
 
   // Anchor at the bottom (latest turn) and capture.
@@ -464,6 +519,7 @@ export async function scrapeFullChat(opts: ScrapeOptions = {}): Promise<Chat> {
     }
 
     cfg.onProgress?.({ turns: ordered.length, iteration: i, atTop, loading: isLoadingOlder() });
+    maybeSnapshot();
 
     // Settled only when we're at the top, nothing is loading, the content
     // stopped growing, and the bounce surfaced no new turns.
@@ -480,22 +536,5 @@ export async function scrapeFullChat(opts: ScrapeOptions = {}): Promise<Chat> {
   await sleep(cfg.scrollDelayMs);
   scan();
 
-  const turns: ChatTurn[] = ordered.map((key, i) => {
-    const d = data.get(key)!;
-    return {
-      index: i,
-      key,
-      question: d.question,
-      answerText: d.answerText,
-      answerHtml: d.answerHtml,
-    };
-  });
-
-  return {
-    id: conversationId(),
-    title: deriveTitle(turns),
-    url: location.href,
-    scrapedAt: new Date().toISOString(),
-    turns,
-  };
+  return buildChat(ordered, data);
 }

@@ -1,59 +1,124 @@
-// Popup controller: scrape the active Gemini tab, manage the collected set in
-// extension storage, and export to EPUB / Markdown / JSON.
+// Popup controller. Captures the active Gemini tab as a *persisted* background
+// job (so closing the popup never loses progress), opens the Gemini-style
+// archive page (optionally deep-linked to the current chat), shows live job
+// status from storage, and manages exports + web-app sync.
 
-import { buildEpub } from "@/lib/epub";
-import { chatsToMarkdown } from "@/lib/markdown";
-import type { Chat, GeminiExport } from "@/lib/types";
-import { EXPORT_FORMAT, EXPORT_VERSION } from "@/lib/types";
+import type { Chat, ScrapeJob } from "@/lib/types";
+import { exportEpub, exportMarkdown, exportJson } from "@/lib/exporters";
 import { getSettings } from "@/lib/settings";
-import type { ScrapeOptions } from "@/lib/scraper";
-
-const STORAGE_KEY = "collected_chats";
+import { getChats, setChats } from "@/lib/chats-store";
+import { getJobs, reconcileStalled } from "@/lib/jobs";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const openArchiveChatBtn = $<HTMLButtonElement>("open-archive-chat");
 const scrapeBtn = $<HTMLButtonElement>("scrape");
 const scrapeFullBtn = $<HTMLButtonElement>("scrape-full");
-const optionsBtn = $<HTMLButtonElement>("open-options");
-const webappBtn = $<HTMLButtonElement>("open-webapp");
 const statusEl = $<HTMLParagraphElement>("status");
+const jobEl = $<HTMLDivElement>("job");
 const listEl = $<HTMLUListElement>("list");
 const countEl = $<HTMLSpanElement>("count");
 const emptyEl = $<HTMLParagraphElement>("empty");
 const bulkActions = $<HTMLDivElement>("bulk-actions");
 const clearBtn = $<HTMLButtonElement>("clear");
-const exportEpubBtn = $<HTMLButtonElement>("export-epub");
-const exportMdBtn = $<HTMLButtonElement>("export-md");
-const exportJsonBtn = $<HTMLButtonElement>("export-json");
-const syncAllBtn = $<HTMLButtonElement>("sync-all");
 
 function setStatus(msg: string, kind: "" | "ok" | "err" = "") {
   statusEl.textContent = msg;
   statusEl.className = "status" + (kind ? " " + kind : "");
 }
 
-async function getChats(): Promise<Chat[]> {
-  const res = await browser.storage.local.get(STORAGE_KEY);
-  return (res[STORAGE_KEY] as Chat[]) ?? [];
+function escapeHtml(s: string) {
+  return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!);
+}
+function escapeAttr(s: string) {
+  return escapeHtml(s).replace(/"/g, "&quot;");
 }
 
-async function setChats(chats: Chat[]): Promise<void> {
-  await browser.storage.local.set({ [STORAGE_KEY]: chats });
+// --- archive page helpers --------------------------------------------------
+
+function archiveUrl(hash = ""): string {
+  return browser.runtime.getURL("/options.html") + (hash || "");
 }
 
-function slugify(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "gemini-chat";
+async function openArchive(hash = ""): Promise<void> {
+  const base = browser.runtime.getURL("/options.html");
+  const tabs = await browser.tabs.query({});
+  const existing = tabs.find((t) => t.url && t.url.startsWith(base));
+  if (existing?.id != null) {
+    await browser.tabs.update(existing.id, { active: true, url: archiveUrl(hash) });
+    if (existing.windowId != null) await browser.windows.update(existing.windowId, { focused: true });
+  } else {
+    await browser.tabs.create({ url: archiveUrl(hash), active: true });
+  }
 }
 
-function download(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 4000);
+// --- live job rendering ----------------------------------------------------
+
+function jobPct(job: ScrapeJob): number {
+  if (job.status !== "scraping") return 100;
+  if (job.atTop) return 95;
+  const t = Math.min(job.turns, 200);
+  return Math.min(90, 8 + t * 0.6);
 }
+
+// Active-tab context, used to label the primary button + show capture deltas.
+let activeChatId: string | undefined;
+let preCount = 0;
+
+async function refreshActiveContext(): Promise<void> {
+  const tab = await activeGeminiTab();
+  if (!tab) { activeChatId = undefined; openArchiveChatBtn.textContent = "Open Archive"; return; }
+  try {
+    const resp = (await browser.tabs.sendMessage(tab.id, { type: "GET_META" })) as
+      | { ok: true; meta: { id: string; title: string } } | { ok: false } | undefined;
+    if (resp && "ok" in resp && resp.ok) {
+      activeChatId = resp.meta.id;
+      const existing = (await getChats()).find((c) => c.id === activeChatId);
+      preCount = existing?.turns.length ?? 0;
+      openArchiveChatBtn.textContent = existing ? "Update this chat in Archive" : "Open this chat in Archive";
+      scrapeFullBtn.textContent = existing ? "Update full chat" : "Capture full chat";
+      return;
+    }
+  } catch {
+    /* content script not loaded yet */
+  }
+  openArchiveChatBtn.textContent = "Open this chat in Archive";
+}
+
+async function renderJob(): Promise<void> {
+  const jobs = await getJobs();
+  const active = jobs.find((j) => j.status === "scraping");
+  const recent = jobs.find((j) => j.status !== "scraping");
+  const job = active || recent;
+  if (!job || (!active && job.finishedAt && Date.now() - Date.parse(job.finishedAt) > 25_000)) {
+    jobEl.hidden = true;
+    return;
+  }
+  jobEl.hidden = false;
+  const isErr = job.status === "error" || job.status === "canceled";
+  jobEl.className = "job" + (isErr ? " err" : "");
+  const delta = job.chatId === activeChatId && preCount > 0 ? job.turns - preCount : 0;
+  const msg =
+    job.status === "scraping"
+      ? `Capturing… ${job.turns} turn${job.turns === 1 ? "" : "s"}${job.loading ? " · loading older" : job.atTop ? " · finishing" : ""}`
+      : job.status === "done"
+        ? `Captured ${job.turns} turn${job.turns === 1 ? "" : "s"}${delta > 0 ? ` · +${delta} new` : ""}`
+        : job.error || "Capture interrupted";
+  jobEl.innerHTML = `
+    ${job.status === "scraping" ? '<div class="spin"></div>' : isErr ? "✕" : "✓"}
+    <div class="grow">
+      <div class="jt" title="${escapeAttr(job.title)}">${escapeHtml(job.title || "Gemini chat")}</div>
+      <div class="jm">${escapeHtml(msg)}</div>
+      ${job.status === "scraping" ? `<div class="track"><div class="fill" style="width:${jobPct(job)}%"></div></div>` : ""}
+    </div>
+    ${job.status === "done" ? `<button class="view" data-chat="${escapeAttr(job.chatId)}">Open</button>` : ""}
+  `;
+  jobEl.querySelector<HTMLButtonElement>("button.view")?.addEventListener("click", (e) => {
+    const id = (e.currentTarget as HTMLButtonElement).dataset.chat!;
+    void openArchive(`#/chat/${encodeURIComponent(id)}`);
+  });
+}
+
+// --- collection list -------------------------------------------------------
 
 async function render() {
   const chats = await getChats();
@@ -69,7 +134,7 @@ async function render() {
     li.className = "item";
     li.innerHTML = `
       <div class="meta">
-        <div class="title" title="${escapeAttr(chat.title)}">${escapeHtml(chat.title)}</div>
+        <div class="title" data-open="${escapeAttr(chat.id)}" title="${escapeAttr(chat.title)}">${escapeHtml(chat.title)}</div>
         <div class="turns">${chat.turns.length} Q&A · ${chat.scrapedAt.slice(0, 10)}</div>
       </div>
       <button class="epub" data-i="${i}" title="Export EPUB">EPUB</button>
@@ -78,13 +143,16 @@ async function render() {
     listEl.appendChild(li);
   });
 
+  listEl.querySelectorAll<HTMLElement>(".title[data-open]").forEach((el) =>
+    el.addEventListener("click", () => void openArchive(`#/chat/${encodeURIComponent(el.dataset.open!)}`)),
+  );
+
   listEl.querySelectorAll<HTMLButtonElement>("button.epub").forEach((b) =>
     b.addEventListener("click", async () => {
       const chat = (await getChats())[Number(b.dataset.i)];
       if (!chat) return;
       setStatus("Building EPUB…");
-      const blob = await buildEpub([chat], { title: chat.title });
-      download(blob, `${slugify(chat.title)}.epub`);
+      await exportEpub([chat]);
       setStatus("EPUB downloaded.", "ok");
     }),
   );
@@ -93,7 +161,7 @@ async function render() {
     b.addEventListener("click", async () => {
       const chat = (await getChats())[Number(b.dataset.i)];
       if (!chat) return;
-      download(new Blob([chatsToMarkdown([chat])], { type: "text/markdown" }), `${slugify(chat.title)}.md`);
+      exportMarkdown([chat]);
       setStatus("Markdown downloaded.", "ok");
     }),
   );
@@ -108,17 +176,10 @@ async function render() {
   );
 }
 
-function escapeHtml(s: string) {
-  return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!);
-}
-function escapeAttr(s: string) {
-  return escapeHtml(s).replace(/"/g, "&quot;");
-}
+// --- web app sync ----------------------------------------------------------
 
-/** Find an existing web app tab for the configured origin, or open one. */
 async function getWebappTab(origin: string): Promise<{ id?: number } | undefined> {
-  const matchPattern = `${origin}/*`;
-  let [tab] = await browser.tabs.query({ url: matchPattern });
+  let [tab] = await browser.tabs.query({ url: `${origin}/*` });
   if (!tab?.id) {
     tab = await browser.tabs.create({ url: origin + "/", active: false });
     await new Promise((r) => setTimeout(r, 1500));
@@ -126,10 +187,6 @@ async function getWebappTab(origin: string): Promise<{ id?: number } | undefined
   return tab;
 }
 
-/**
- * Push chats into the companion web app's IndexedDB via the bridge content
- * script. Returns a status fragment. Best-effort — never throws.
- */
 async function syncToWebapp(chats: Chat[], force = false): Promise<string> {
   const settings = await getSettings();
   if (!settings.autoSyncToWebapp && !force) return "";
@@ -142,146 +199,106 @@ async function syncToWebapp(chats: Chat[], force = false): Promise<string> {
       chats,
       mode: settings.mergeMode,
     })) as { ok: boolean; imported?: number; error?: string } | undefined;
-    return resp?.ok
-      ? ` Synced ${resp.imported ?? chats.length} to web app.`
-      : ` Sync failed: ${resp?.error || "unknown error"}.`;
+    return resp?.ok ? ` Synced ${resp.imported ?? chats.length} to web app.` : ` Sync failed: ${resp?.error || "unknown error"}.`;
   } catch {
     return " Sync failed (open the web app tab, then retry).";
   }
 }
 
-/**
- * Run a full scroll-capture over a long-lived Port so the popup can show live
- * progress. Falls back to a one-shot message if the port can't be opened.
- */
-function scrapeFullViaPort(
-  tabId: number,
-  opts: ScrapeOptions | undefined,
-): Promise<{ ok: true; chat: Chat } | { ok: false; error: string }> {
-  return new Promise((resolve) => {
-    let port: ReturnType<typeof browser.tabs.connect>;
-    try {
-      port = browser.tabs.connect(tabId, { name: "scrape-full" });
-    } catch {
-      // Fall back to the request/response path.
-      browser.tabs
-        .sendMessage(tabId, { type: "SCRAPE_FULL_CHAT", opts })
-        .then((r) => resolve(r as never))
-        .catch((e) => resolve({ ok: false, error: e instanceof Error ? e.message : String(e) }));
-      return;
-    }
-    let settled = false;
-    port.onMessage.addListener((msg: { type: string; turns?: number; chat?: Chat; error?: string }) => {
-      if (msg.type === "progress") {
-        setStatus(`Scrolling… captured ${msg.turns ?? 0} turns`);
-      } else if (msg.type === "done" && msg.chat) {
-        settled = true;
-        resolve({ ok: true, chat: msg.chat });
-        port.disconnect();
-      } else if (msg.type === "error") {
-        settled = true;
-        resolve({ ok: false, error: msg.error || "Scrape failed." });
-        port.disconnect();
-      }
-    });
-    port.onDisconnect.addListener(() => {
-      if (!settled) resolve({ ok: false, error: "Lost connection to the page. Reload it and retry." });
-    });
-    port.postMessage({ type: "start", opts });
-  });
+// --- actions ---------------------------------------------------------------
+
+async function activeGeminiTab(): Promise<{ id: number; url: string } | null> {
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !tab.url?.includes("gemini.google.com")) return null;
+  return { id: tab.id, url: tab.url };
 }
 
-async function runScrape(full: boolean) {
-  setStatus(full ? "Scraping full chat (scrolling)…" : "Scraping visible turns…");
-  scrapeBtn.disabled = true;
-  scrapeFullBtn.disabled = true;
+/** Start a persisted background capture in the active Gemini tab. */
+async function startCapture(): Promise<{ ok: boolean; chatId?: string; error?: string }> {
+  const tab = await activeGeminiTab();
+  if (!tab) return { ok: false, error: "Open a Gemini chat tab first." };
+  const s = await getSettings();
   try {
-    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id || !tab.url?.includes("gemini.google.com")) {
-      setStatus("Open a Gemini chat tab first.", "err");
-      return;
-    }
-
-    let resp: { ok: true; chat: Chat } | { ok: false; error: string };
-    if (full) {
-      const s = await getSettings();
-      const opts: ScrapeOptions = { scrollDelayMs: s.scrollDelayMs, maxIterations: s.maxIterations };
-      resp = await scrapeFullViaPort(tab.id, opts);
-    } else {
-      resp = (await browser.tabs.sendMessage(tab.id, { type: "SCRAPE_CHAT" })) as typeof resp;
-    }
-
-    if (!resp?.ok) {
-      setStatus(resp?.error || "Could not scrape this page.", "err");
-      return;
-    }
-    const chats = await getChats();
-    const existing = chats.findIndex((c) => c.id === resp.chat.id);
-    if (existing >= 0) chats[existing] = resp.chat;
-    else chats.push(resp.chat);
-    await setChats(chats);
-    await render();
-
-    const base = `Saved “${resp.chat.title}” (${resp.chat.turns.length} Q&A)${existing >= 0 ? " — updated" : ""}.`;
-    const syncMsg = await syncToWebapp([resp.chat]);
-    setStatus(base + syncMsg, "ok");
-  } catch (err) {
-    setStatus(
-      "Scrape failed. Reload the Gemini tab so the content script loads, then retry.",
-      "err",
-    );
-    console.error(err);
-  } finally {
-    scrapeBtn.disabled = false;
-    scrapeFullBtn.disabled = false;
+    const resp = (await browser.tabs.sendMessage(tab.id, {
+      type: "START_SCRAPE",
+      opts: { scrollDelayMs: s.scrollDelayMs, maxIterations: s.maxIterations },
+    })) as { ok: boolean; jobId?: string; chatId?: string; error?: string } | undefined;
+    if (!resp?.ok) return { ok: false, error: resp?.error || "Could not start the capture." };
+    return { ok: true, chatId: resp.chatId };
+  } catch {
+    return { ok: false, error: "Reload the Gemini tab so the content script loads, then retry." };
   }
 }
 
-scrapeBtn.addEventListener("click", () => runScrape(false));
-scrapeFullBtn.addEventListener("click", () => runScrape(true));
-optionsBtn.addEventListener("click", () => browser.runtime.openOptionsPage());
-webappBtn.addEventListener("click", async () => {
-  const s = await getSettings();
-  const origin = s.webappOrigin.replace(/\/+$/, "");
-  await browser.tabs.create({ url: origin + "/", active: true });
+openArchiveChatBtn.addEventListener("click", async () => {
+  setStatus("Starting capture…");
+  const res = await startCapture();
+  if (!res.ok) {
+    // Not on a Gemini tab (or failed) — still open the archive so the user can browse.
+    if (res.error?.includes("Gemini")) {
+      setStatus("Opening Archive…");
+      await openArchive("#/search");
+      return;
+    }
+    setStatus(res.error || "Could not start.", "err");
+    return;
+  }
+  await renderJob();
+  setStatus("Capturing in the background — opening Archive…", "ok");
+  await openArchive(res.chatId ? `#/chat/${encodeURIComponent(res.chatId)}` : "#/search");
 });
 
-exportEpubBtn.addEventListener("click", async () => {
+scrapeFullBtn.addEventListener("click", async () => {
+  scrapeFullBtn.disabled = true;
+  setStatus("Starting background capture…");
+  const res = await startCapture();
+  setStatus(res.ok ? "Capturing in the background. You can close this popup." : res.error || "Failed.", res.ok ? "ok" : "err");
+  await renderJob();
+  scrapeFullBtn.disabled = false;
+});
+
+scrapeBtn.addEventListener("click", async () => {
+  scrapeBtn.disabled = true;
+  setStatus("Capturing visible turns…");
+  try {
+    const tab = await activeGeminiTab();
+    if (!tab) { setStatus("Open a Gemini chat tab first.", "err"); return; }
+    const resp = (await browser.tabs.sendMessage(tab.id, { type: "SCRAPE_CHAT" })) as
+      | { ok: true; chat: Chat } | { ok: false; error: string } | undefined;
+    if (!resp?.ok) { setStatus(resp?.error || "Could not capture this page.", "err"); return; }
+    await render();
+    const sync = await syncToWebapp([resp.chat]);
+    setStatus(`Saved “${resp.chat.title}” (${resp.chat.turns.length} Q&A).` + sync, "ok");
+  } catch {
+    setStatus("Reload the Gemini tab so the content script loads, then retry.", "err");
+  } finally {
+    scrapeBtn.disabled = false;
+  }
+});
+
+$<HTMLButtonElement>("export-epub").addEventListener("click", async () => {
   const chats = await getChats();
   if (!chats.length) return;
   setStatus("Building EPUB…");
-  const blob = await buildEpub(chats, {
-    title: chats.length === 1 ? chats[0]!.title : "Gemini Chats",
-  });
-  download(blob, chats.length === 1 ? `${slugify(chats[0]!.title)}.epub` : "gemini-chats.epub");
+  await exportEpub(chats);
   setStatus("EPUB downloaded.", "ok");
 });
 
-exportMdBtn.addEventListener("click", async () => {
+$<HTMLButtonElement>("export-md").addEventListener("click", async () => {
   const chats = await getChats();
   if (!chats.length) return;
-  download(
-    new Blob([chatsToMarkdown(chats)], { type: "text/markdown" }),
-    chats.length === 1 ? `${slugify(chats[0]!.title)}.md` : "gemini-chats.md",
-  );
+  exportMarkdown(chats);
   setStatus("Markdown downloaded.", "ok");
 });
 
-exportJsonBtn.addEventListener("click", async () => {
+$<HTMLButtonElement>("export-json").addEventListener("click", async () => {
   const chats = await getChats();
   if (!chats.length) return;
-  const payload: GeminiExport = {
-    format: EXPORT_FORMAT,
-    version: EXPORT_VERSION,
-    exportedAt: new Date().toISOString(),
-    chats,
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  download(blob, "gemini-chats.json");
-  setStatus("JSON downloaded — import it in the web app.", "ok");
+  exportJson(chats);
+  setStatus("JSON downloaded — import it in the web app or Archive.", "ok");
 });
 
-syncAllBtn.addEventListener("click", async () => {
+$<HTMLButtonElement>("sync-all").addEventListener("click", async () => {
   const chats = await getChats();
   if (!chats.length) return;
   setStatus("Syncing all chats to the web app…");
@@ -295,4 +312,21 @@ clearBtn.addEventListener("click", async () => {
   setStatus("Collection cleared.");
 });
 
-render();
+$<HTMLButtonElement>("open-archive").addEventListener("click", () => void openArchive("#/search"));
+$<HTMLButtonElement>("open-options").addEventListener("click", () => void openArchive("#/settings"));
+$<HTMLButtonElement>("open-webapp").addEventListener("click", async () => {
+  const s = await getSettings();
+  await browser.tabs.create({ url: s.webappOrigin.replace(/\/+$/, "") + "/", active: true });
+});
+
+// Live updates while the popup is open.
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (changes.collected_chats) { void render(); void refreshActiveContext(); }
+  if (changes.scrape_jobs) void renderJob();
+});
+
+void reconcileStalled();
+void render();
+void refreshActiveContext().then(renderJob);
+void renderJob();

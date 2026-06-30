@@ -3,3 +3,8 @@ node_modules
 .wxt
 stats.html
 *.zip
+
+# Generated at build time (large, version-locked binaries). See scripts/copy-ort.mjs
+public/ort
+# Bundled embedding model weights (optional offline cache). See scripts/fetch-model.mjs
+public/models

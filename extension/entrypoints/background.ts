@@ -1,22 +1,28 @@
 // Background service worker.
-//   • Keeps the toolbar badge showing how many chats are collected.
-//   • Adds a right-click context menu + keyboard command to scrape the full
-//     conversation without opening the popup.
+//   • Keeps the toolbar badge in sync with the collected-chats count, and shows
+//     a live indicator while a capture is running.
+//   • Right-click menu + keyboard command start a *persisted* background scrape
+//     (the content script owns the capture + persistence, so it survives the SW
+//     being evicted).
+//   • Tells content scripts which tab they live in (WHICH_TAB).
+//   • Syncs freshly-finished chats into the companion web app when enabled.
 
-import type { Chat } from "@/lib/types";
+import type { Chat, ScrapeJob } from "@/lib/types";
 import { getSettings } from "@/lib/settings";
+import { getChats, CHATS_KEY } from "@/lib/chats-store";
+import { JOBS_KEY, getJobs, reconcileStalled } from "@/lib/jobs";
 
-const STORAGE_KEY = "collected_chats";
 const MENU_ID = "scrape-full-chat";
-
-async function getChats(): Promise<Chat[]> {
-  const res = await browser.storage.local.get(STORAGE_KEY);
-  return (res[STORAGE_KEY] as Chat[]) ?? [];
-}
 
 async function updateBadge(): Promise<void> {
   try {
-    const chats = await getChats();
+    const [chats, jobs] = await Promise.all([getChats(), getJobs()]);
+    const active = jobs.some((j) => j.status === "scraping");
+    if (active) {
+      await browser.action.setBadgeText({ text: "…" });
+      await browser.action.setBadgeBackgroundColor({ color: "#1a73e8" });
+      return;
+    }
     const n = chats.length;
     await browser.action.setBadgeText({ text: n ? String(n) : "" });
     await browser.action.setBadgeBackgroundColor({ color: "#673ab7" });
@@ -25,7 +31,7 @@ async function updateBadge(): Promise<void> {
   }
 }
 
-/** Best-effort sync of a chat into the web app, mirroring the popup logic. */
+/** Best-effort sync of a chat into the web app. */
 async function syncToWebapp(chat: Chat): Promise<void> {
   const settings = await getSettings();
   if (!settings.autoSyncToWebapp) return;
@@ -44,11 +50,12 @@ async function syncToWebapp(chat: Chat): Promise<void> {
       });
     }
   } catch {
-    /* ignore — popup surfaces sync errors interactively */
+    /* ignore — the popup surfaces sync errors interactively */
   }
 }
 
-async function scrapeActiveTab(tabId: number, tabUrl?: string): Promise<void> {
+/** Kick off a persisted scrape in a Gemini tab (used by menu + command). */
+async function startScrapeInTab(tabId: number, tabUrl?: string): Promise<void> {
   if (!tabUrl?.includes("gemini.google.com")) {
     await flashBadge("!");
     return;
@@ -56,22 +63,10 @@ async function scrapeActiveTab(tabId: number, tabUrl?: string): Promise<void> {
   try {
     const settings = await getSettings();
     const resp = (await browser.tabs.sendMessage(tabId, {
-      type: "SCRAPE_FULL_CHAT",
+      type: "START_SCRAPE",
       opts: { scrollDelayMs: settings.scrollDelayMs, maxIterations: settings.maxIterations },
-    })) as { ok: true; chat: Chat } | { ok: false; error: string } | undefined;
-
-    if (!resp?.ok) {
-      await flashBadge("!");
-      return;
-    }
-    const chats = await getChats();
-    const i = chats.findIndex((c) => c.id === resp.chat.id);
-    if (i >= 0) chats[i] = resp.chat;
-    else chats.push(resp.chat);
-    await browser.storage.local.set({ [STORAGE_KEY]: chats });
-    await updateBadge();
-    await syncToWebapp(resp.chat);
-    await flashBadge("✓");
+    })) as { ok: boolean; error?: string } | undefined;
+    await flashBadge(resp?.ok ? "…" : "!");
   } catch {
     await flashBadge("!");
   }
@@ -80,10 +75,23 @@ async function scrapeActiveTab(tabId: number, tabUrl?: string): Promise<void> {
 async function flashBadge(text: string): Promise<void> {
   try {
     await browser.action.setBadgeText({ text });
-    await browser.action.setBadgeBackgroundColor({ color: text === "✓" ? "#1a73e8" : "#f28b82" });
+    await browser.action.setBadgeBackgroundColor({ color: text === "!" ? "#f28b82" : "#1a73e8" });
     setTimeout(updateBadge, 2000);
   } catch {
     /* ignore */
+  }
+}
+
+/** Track which jobs we've already synced so a single completion fires once. */
+const syncedJobs = new Set<string>();
+
+async function onJobsChanged(jobs: ScrapeJob[]): Promise<void> {
+  for (const job of jobs) {
+    if (job.status === "done" && !syncedJobs.has(job.id)) {
+      syncedJobs.add(job.id);
+      const chat = (await getChats()).find((c) => c.id === job.chatId);
+      if (chat) void syncToWebapp(chat);
+    }
   }
 }
 
@@ -97,32 +105,51 @@ export default defineBackground(() => {
     try {
       browser.contextMenus.create({
         id: MENU_ID,
-        title: "Scrape this Gemini chat (full)",
+        title: "Capture this Gemini chat (full)",
         contexts: ["page"],
         documentUrlPatterns: ["https://gemini.google.com/*"],
       });
     } catch {
       /* contextMenus may not be granted in all builds */
     }
-    updateBadge();
+    void reconcileStalled();
+    void updateBadge();
   });
 
-  browser.runtime.onStartup?.addListener(updateBadge);
+  browser.runtime.onStartup?.addListener(() => {
+    void reconcileStalled();
+    void updateBadge();
+  });
 
-  // Keep the badge in sync as the collection changes.
+  // Reply to content scripts asking which tab they're in.
+  browser.runtime.onMessage.addListener((msg: { type?: string }, sender, sendResponse) => {
+    if (msg?.type === "WHICH_TAB") {
+      sendResponse({ tabId: sender.tab?.id });
+      return; // synchronous
+    }
+    return false;
+  });
+
+  // Keep the badge in sync and react to job completions.
   browser.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes[STORAGE_KEY]) updateBadge();
+    if (area !== "local") return;
+    if (changes[CHATS_KEY] || changes[JOBS_KEY]) void updateBadge();
+    if (changes[JOBS_KEY]) {
+      const next = (changes[JOBS_KEY].newValue as ScrapeJob[]) ?? [];
+      void onJobsChanged(next);
+    }
   });
 
   browser.contextMenus?.onClicked.addListener((info, tab) => {
-    if (info.menuItemId === MENU_ID && tab?.id) scrapeActiveTab(tab.id, tab.url);
+    if (info.menuItemId === MENU_ID && tab?.id) void startScrapeInTab(tab.id, tab.url);
   });
 
   browser.commands?.onCommand.addListener(async (command) => {
     if (command !== "scrape-full-chat") return;
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id) scrapeActiveTab(tab.id, tab.url);
+    if (tab?.id) void startScrapeInTab(tab.id, tab.url);
   });
 
-  updateBadge();
+  void reconcileStalled();
+  void updateBadge();
 });

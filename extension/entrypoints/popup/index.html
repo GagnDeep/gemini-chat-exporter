@@ -3,21 +3,27 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Gemini Chat Exporter</title>
+    <title>Gemini Chat Archive</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <header>
       <div class="logo">✦</div>
       <div>
-        <h1>Gemini Chat Exporter</h1>
-        <p class="sub">Scrape · EPUB · JSON</p>
+        <h1>Gemini Chat Archive</h1>
+        <p class="sub">Capture · Search · Export</p>
       </div>
     </header>
 
     <main>
-      <button id="scrape-full" class="primary">Scrape full chat</button>
-      <button id="scrape" class="secondary full">Scrape visible only</button>
+      <button id="open-archive-chat" class="primary">Open this chat in Archive</button>
+
+      <div class="row2">
+        <button id="scrape-full" class="secondary">Capture full chat</button>
+        <button id="scrape" class="secondary">Capture visible</button>
+      </div>
+
+      <div id="job" class="job" hidden></div>
       <p id="status" class="status"></p>
 
       <section id="collection">
@@ -26,7 +32,7 @@
           <button id="clear" class="link" hidden>Clear all</button>
         </div>
         <ul id="list" class="list"></ul>
-        <p id="empty" class="empty">No chats yet. Open a Gemini conversation and click “Scrape full chat” (or press Alt+Shift+G).</p>
+        <p id="empty" class="empty">No chats yet. Open a Gemini conversation and click “Open this chat in Archive” (or press Alt+Shift+G to capture in the background).</p>
       </section>
 
       <div class="actions actions-grid" id="bulk-actions" hidden>
@@ -37,9 +43,11 @@
       </div>
 
       <div class="footer">
+        <button id="open-archive" class="link">Open Archive</button>
+        <span class="dot">·</span>
         <button id="open-options" class="link">Settings</button>
         <span class="dot">·</span>
-        <button id="open-webapp" class="link">Open web app</button>
+        <button id="open-webapp" class="link">Web app</button>
       </div>
     </main>
 

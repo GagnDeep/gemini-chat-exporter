@@ -11,7 +11,7 @@ const EXTENSION_SOURCE = "gemini-exporter-extension";
 const PAGE_SOURCE = "gemini-exporter-webapp";
 
 export default defineContentScript({
-  matches: ["http://localhost:3000/*"],
+  matches: ["https://epub-viewer.xn--lkv.com/*", "http://localhost:3000/*"],
   main() {
     browser.runtime.onMessage.addListener(
       (

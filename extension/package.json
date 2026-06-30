@@ -2,21 +2,35 @@
   "name": "gemini-chat-exporter",
   "description": "Scrape Google Gemini conversations and export them as EPUB or JSON.",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
-    "dev": "wxt",
-    "dev:firefox": "wxt -b firefox",
-    "build": "wxt build",
-    "build:firefox": "wxt build -b firefox",
-    "zip": "wxt zip",
+    "dev": "node scripts/copy-ort.mjs && wxt",
+    "dev:firefox": "node scripts/copy-ort.mjs && wxt -b firefox",
+    "build": "node scripts/copy-ort.mjs && wxt build",
+    "build:firefox": "node scripts/copy-ort.mjs && wxt build -b firefox",
+    "zip": "node scripts/copy-ort.mjs && wxt zip",
     "compile": "tsc --noEmit",
-    "postinstall": "wxt prepare"
+    "fetch-model": "node scripts/fetch-model.mjs",
+    "postinstall": "wxt prepare && node scripts/copy-ort.mjs"
   },
   "dependencies": {
-    "jszip": "3.10.1"
+    "@huggingface/transformers": "^4.2.0",
+    "@tanstack/react-virtual": "^3.14.4",
+    "compromise": "^14.15.1",
+    "fuse.js": "^7.4.2",
+    "highlight.js": "^11.11.1",
+    "jszip": "3.10.1",
+    "katex": "^0.17.0",
+    "onnxruntime-web": "1.26.0-dev.20260416-b7804b056c",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
+    "@types/katex": "^0.16.8",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@wxt-dev/module-react": "^1.2.2",
     "typescript": "5.9.2",
     "wxt": "0.20.26"
   },

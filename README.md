@@ -3,15 +3,24 @@
 Two-part toolkit for capturing your Google Gemini conversations and making them
 readable, searchable, and portable.
 
-1. **`extension/`** — a [WXT](https://wxt.dev) Chrome/Firefox extension that scrapes
-   the conversation open in your Gemini tab and exports it as **EPUB** (one chapter
-   per question + answer) or **JSON**.
+1. **`extension/`** — a [WXT](https://wxt.dev) Chrome/Firefox extension that captures
+   the conversation open in your Gemini tab into a **built-in, Gemini-style archive
+   page** with best-in-class **search** (keyword · fuzzy · on-device semantic ·
+   smart **hybrid**), and exports to **EPUB**, **Markdown**, or **JSON**. Captures run
+   as **persisted background jobs** that survive closing the popup or the service
+   worker — progress and results are written straight to storage, so nothing is lost.
 2. **`webapp/`** — a [Next.js 16](https://nextjs.org) web app (shadcn/ui, custom
    Gemini theme) that imports the JSON, stores it locally in your browser, and lets
    you read and search every chat with **keyword**, **fuzzy**, and on-device
    **semantic** search — and re-export to EPUB.
 
-Everything runs locally. No chat content is ever sent to a server.
+Everything runs locally. No chat content is ever sent to a server. (The semantic
+model weights are the only network fetch — and they download once, from the model
+hub, then run entirely on-device.)
+
+> The web app remains available as an optional companion, but the extension is now
+> self-contained: the in-extension **Archive** page reads captured chats live from
+> extension storage, so you no longer need the export→import dance to search and read.
 
 ---
 
@@ -57,15 +66,48 @@ folder), and click the **↻ reload** button on the extension's card in
 `chrome://extensions`.
 
 ### What it does
-- **Scrape this chat** — reads the conversation currently open on
-  `gemini.google.com`, pulling each user prompt and Gemini's answer (plain text +
-  sanitized HTML).
-- Builds a **collection** in extension storage so you can scrape several chats
+- **Open this chat in Archive** — captures the conversation currently open on
+  `gemini.google.com` (full auto-scroll capture) and opens the built-in archive
+  page, deep-linked to that chat.
+- **Background capture that never loses work** — the capture is owned by the content
+  script and persists *partial snapshots* and the *final result* directly to
+  `browser.storage.local`. Close the popup, switch tabs, let the service worker
+  sleep — progress keeps being written and the finished chat is committed safely.
+  Live job status shows in the popup and the archive (and survives reopening).
+- **Archive page (the options page)** — a Gemini-style UI: a slim icon rail, a
+  prominent search box, a reader for each conversation, dark/light themes.
+- **Best-in-class search** over everything captured:
+  - **Smart (hybrid)** — fuses BM25 lexical ranking with semantic vectors via
+    Reciprocal Rank Fusion (falls back to BM25 + fuzzy before the vector index is
+    built). This is the default.
+  - **Keyword** — every term must appear; title/question matches are boosted.
+  - **Fuzzy** — typo-tolerant (Fuse.js).
+  - **Semantic / vector** — meaning-based, using `all-MiniLM-L6-v2` running fully
+    on-device (bundled transformers.js worker; the ONNX runtime is self-hosted in
+    the extension, only model weights are fetched once and cached). Vectors are
+    cached in IndexedDB and only changed turns are re-embedded.
+- **Builds a collection** in extension storage so you can capture several chats
   across visits.
-- **Export all as EPUB** — each Q&A becomes its own chapter; multiple chats are
-  grouped with a section title page and nested table of contents.
-- **Export JSON** — the file you drop into the web app.
-- Per-chat **EPUB** button in the list.
+- **Export** — all (or any single chat) as **EPUB** (each Q&A its own chapter),
+  **Markdown**, or **JSON**. Import JSON back into the archive too.
+
+#### Power features
+- **Results grouped by conversation** — one card per chat with its best match and
+  an expandable "N more matches in this chat", each jumping straight to that turn.
+- **Query-linked reading** — opening a result highlights every match in the
+  conversation and jumps to the first; press **F** for in-chat find with **N /
+  Shift+N** to step through matches.
+- **Command palette** (**⌘/Ctrl+K**) — jump to any chat or run any action; **?**
+  shows all keyboard shortcuts.
+- **Filters & sort** — any-time / 7d / 30d / 1y, relevance or recency, plus
+  remembered **recent searches**.
+- **Pin & rename** chats (custom titles never touch the captured content).
+- **Copy** any answer or code block in one click; **prev/next** chat navigation.
+- **Backup & restore** the whole archive (chats + pins + settings) as one file,
+  with a live **storage-usage meter**.
+- **"Update this chat"** — the popup detects a chat already in your archive and
+  shows how many new turns a re-capture added.
+- **Appearance** — dark / light / match-system theme and a compact density.
 
 ### How it scrapes
 Gemini renders each turn as a `.conversation-container` holding a `<user-query>`
@@ -90,11 +132,17 @@ To load a production build manually: open `chrome://extensions`, enable
 
 ### Use it
 1. Open a conversation on `gemini.google.com`.
-2. Click the extension icon → **Scrape this chat**.
-3. Repeat for other chats if you like.
-4. **Export JSON** (for the web app) or **Export all as EPUB**.
+2. Click the extension icon → **Open this chat in Archive** (or press **Alt+Shift+G**
+   to capture in the background without opening the popup).
+3. The Archive opens to that chat. Capture more chats anytime; they all appear in the
+   archive's search.
+4. Search with **Smart / Keyword / Fuzzy / Semantic**, read any chat, and **export**
+   to EPUB / Markdown / JSON from the chat header or Settings.
 
-> If "Scrape" reports it can't reach the page, reload the Gemini tab once so the
+> First-time semantic/smart search: click **Build vector index** (in the search
+> banner or Settings) once. The model downloads a single time and then runs offline.
+>
+> If a capture reports it can't reach the page, reload the Gemini tab once so the
 > content script loads, then try again.
 
 ---
@@ -162,7 +210,8 @@ conversion, etc.).
 - A Chromium browser (or Firefox) for the extension.
 
 ## Tech versions
-Extension: WXT 0.20, TypeScript 5.9, JSZip 3.10.
+Extension: WXT 0.20, React 19, TypeScript 5.9, JSZip 3.10, Fuse.js 7,
+transformers.js 4 (`all-MiniLM-L6-v2`, bundled + self-hosted ONNX runtime).
 Web app: Next 16.2, React 19.2, Tailwind 4.3, Dexie 4.2, Fuse.js 7.4,
 transformers.js 4.2 (`all-MiniLM-L6-v2`).
 
