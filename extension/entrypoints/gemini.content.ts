@@ -25,6 +25,7 @@ import {
 import type { Chat, ScrapeJob } from "@/lib/types";
 import { commitChat } from "@/lib/chats-store";
 import { startJob, updateJob, finishJob } from "@/lib/jobs";
+import { submitPrompt } from "@/lib/compose";
 
 function preflightError(): string | null {
   if (!hasConversation()) {
@@ -138,10 +139,17 @@ export default defineContentScript({
 
     browser.runtime.onMessage.addListener(
       (
-        message: { type?: string; opts?: ScrapeOptions },
+        message: { type?: string; opts?: ScrapeOptions; text?: string },
         _sender,
         sendResponse,
       ) => {
+        if (message?.type === "SEND_PROMPT") {
+          submitPrompt(message.text ?? "")
+            .then(() => sendResponse({ ok: true }))
+            .catch((e) => sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+          return true; // async
+        }
+
         if (message?.type === "SCRAPE_CHAT") {
           try {
             if (!hasConversation()) {

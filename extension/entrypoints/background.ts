@@ -82,6 +82,73 @@ async function flashBadge(text: string): Promise<void> {
   }
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Wait (bounded) for a tab to finish loading before we message its content script. */
+async function waitForTabComplete(tabId: number, timeoutMs: number): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const t = await browser.tabs.get(tabId);
+      if (t.status === "complete") return;
+    } catch {
+      return; // tab gone
+    }
+    await sleep(300);
+  }
+}
+
+/**
+ * Ask a Gemini tab's content script to type + submit a prompt, retrying while the
+ * content script (or the SPA it drives) is still coming up on a fresh tab.
+ */
+async function sendPromptToTab(tabId: number, text: string): Promise<{ ok: boolean; error?: string }> {
+  let lastErr = "";
+  for (let i = 0; i < 30; i++) {
+    try {
+      const resp = (await browser.tabs.sendMessage(tabId, { type: "SEND_PROMPT", text })) as
+        | { ok: boolean; error?: string }
+        | undefined;
+      if (resp) return resp;
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e); // usually "no receiving end yet"
+    }
+    await sleep(500);
+  }
+  return { ok: false, error: lastErr || "The Gemini page didn't respond in time." };
+}
+
+/**
+ * Continue an archived conversation live: focus (or open) its Gemini tab and
+ * submit `text` into the composer. Reuses an existing tab already on that
+ * conversation when one is open, so we never spawn duplicates.
+ */
+async function sendToGemini(args: { url?: string; convId?: string; text: string }): Promise<{ ok: boolean; error?: string }> {
+  const text = (args.text || "").trim();
+  if (!text) return { ok: false, error: "Nothing to send." };
+  try {
+    const tabs = await browser.tabs.query({ url: "https://gemini.google.com/*" });
+    let tab = args.convId ? tabs.find((t) => t.url && t.url.includes(args.convId!)) : undefined;
+    let freshlyOpened = false;
+
+    if (tab?.id != null) {
+      await browser.tabs.update(tab.id, { active: true });
+      if (tab.windowId != null) {
+        try { await browser.windows.update(tab.windowId, { focused: true }); } catch { /* single-window */ }
+      }
+    } else {
+      tab = await browser.tabs.create({ url: args.url || "https://gemini.google.com/app", active: true });
+      freshlyOpened = true;
+    }
+    if (tab?.id == null) return { ok: false, error: "Couldn't open a Gemini tab." };
+
+    await waitForTabComplete(tab.id, freshlyOpened ? 25_000 : 8_000);
+    return await sendPromptToTab(tab.id, text);
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 /** Track which jobs we've already synced so a single completion fires once. */
 const syncedJobs = new Set<string>();
 
@@ -122,13 +189,19 @@ export default defineBackground(() => {
   });
 
   // Reply to content scripts asking which tab they're in.
-  browser.runtime.onMessage.addListener((msg: { type?: string }, sender, sendResponse) => {
-    if (msg?.type === "WHICH_TAB") {
-      sendResponse({ tabId: sender.tab?.id });
-      return; // synchronous
-    }
-    return false;
-  });
+  browser.runtime.onMessage.addListener(
+    (msg: { type?: string; url?: string; convId?: string; text?: string }, sender, sendResponse) => {
+      if (msg?.type === "WHICH_TAB") {
+        sendResponse({ tabId: sender.tab?.id });
+        return; // synchronous
+      }
+      if (msg?.type === "SEND_TO_GEMINI") {
+        sendToGemini({ url: msg.url, convId: msg.convId, text: msg.text ?? "" }).then(sendResponse);
+        return true; // async
+      }
+      return false;
+    },
+  );
 
   // Keep the badge in sync and react to job completions.
   browser.storage.onChanged.addListener((changes, area) => {
