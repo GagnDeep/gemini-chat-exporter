@@ -83,6 +83,10 @@ export function ChatView({ chatId, turn, query, mode, terms }: { chatId: string;
 
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
+  // Composer: send a new prompt into this conversation's live Gemini tab.
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   // Docks default ON for desktop, OFF for mobile; the user's choice is remembered.
   const [showInsights, setShowInsights] = useState(() => dockDefault("dock-insights"));
   const [showOutline, setShowOutline] = useState(() => dockDefault("dock-outline"));
@@ -290,6 +294,14 @@ export function ChatView({ chatId, turn, query, mode, terms }: { chatId: string;
   // Hide the inline vector-build panel once the index is complete.
   useEffect(() => { if (vindex.upToDate) setShowVectorPanel(false); }, [vindex.upToDate]);
 
+  // Auto-grow the composer with its content (and shrink back when it clears).
+  useEffect(() => {
+    const ta = composerRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight, 220) + "px";
+  }, [draft]);
+
   // When matches/hits first populate after a deep-link or an overlay jump, move
   // `cur` to the hit in the target turn (the jump target takes priority over the
   // deep-linked turn). One-shot via findInitRef until the next target is set.
@@ -429,6 +441,32 @@ export function ChatView({ chatId, turn, query, mode, terms }: { chatId: string;
   const stepMatch = (dir: 1 | -1) => {
     clearArrived();
     setCur((c) => (navLen ? (c + dir + navLen) % navLen : 0));
+  };
+
+  // Continue this conversation live: hand the prompt to the background worker,
+  // which focuses (or opens) this chat's Gemini tab and submits it there.
+  const sendPrompt = async () => {
+    const text = draft.trim();
+    if (!text || sending) return;
+    setSending(true);
+    try {
+      const resp = (await browser.runtime.sendMessage({
+        type: "SEND_TO_GEMINI",
+        url: chat.url,
+        convId: chat.id,
+        text,
+      })) as { ok: boolean; error?: string } | undefined;
+      if (resp?.ok) {
+        setDraft("");
+        showToast("Sent to Gemini — opening the conversation…", "ok");
+      } else {
+        showToast(resp?.error || "Couldn't send the message to Gemini.", "err");
+      }
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "Couldn't reach the Gemini tab.", "err");
+    } finally {
+      setSending(false);
+    }
   };
 
   const renderTurn = (t: ChatTurn) => {
@@ -578,6 +616,26 @@ export function ChatView({ chatId, turn, query, mode, terms }: { chatId: string;
           <VectorPrompt index={vindex} onClose={() => { setShowVectorPanel(false); setVectorDismissed(true); }} />
         )}
         {chat.turns.map((t) => <React.Fragment key={t.key || t.index}>{renderTurn(t)}</React.Fragment>)}
+
+        <div className="gemini-composer">
+          <textarea
+            ref={composerRef}
+            className="gc-input"
+            rows={1}
+            value={draft}
+            disabled={sending}
+            placeholder="Message Gemini…"
+            aria-label="Continue this conversation in Gemini"
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendPrompt(); }
+            }} />
+          <button className="gc-send" title="Send to Gemini (Enter)" aria-label="Send to Gemini"
+            disabled={sending || !draft.trim()} onClick={() => void sendPrompt()}>
+            <I.Send size={18} />
+          </button>
+        </div>
+        <div className="gc-hint">Opens this chat in Gemini and sends your message there.</div>
 
         <div className="toolbar" style={{ marginTop: 24, justifyContent: "space-between" }}>
           {prevChat ? (

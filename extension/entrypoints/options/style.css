@@ -790,3 +790,51 @@ html[data-theme="light"] .hljs-title, html[data-theme="light"] .hljs-tag { color
 .ins-section-head .grow { flex: 1; }
 .ins-section-head .rot { transform: rotate(-90deg); }
 @media (max-width: 1100px) { .insights { width: 300px; } }
+
+/* --- Continue-in-Gemini composer (bottom of the reader) --------------------- */
+.gemini-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 28px;
+  padding: 8px 8px 8px 16px;
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: 26px;
+  transition: border-color .15s ease, background .15s ease;
+}
+.gemini-composer:focus-within { background: var(--input-focus); border-color: var(--accent); }
+.gc-input {
+  flex: 1;
+  min-height: 24px;
+  max-height: 220px;
+  padding: 8px 0;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-md);
+  line-height: var(--lh-normal);
+}
+.gc-input::placeholder { color: var(--text-mute); }
+.gc-input:disabled { opacity: .6; }
+.gc-send {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent-strong);
+  color: #fff;
+  cursor: pointer;
+  transition: opacity .15s ease, transform .05s ease;
+}
+.gc-send:hover:not(:disabled) { opacity: .9; }
+.gc-send:active:not(:disabled) { transform: scale(.94); }
+.gc-send:disabled { opacity: .4; cursor: default; }
+.gc-hint { margin: 6px 4px 0; font-size: var(--fs-xs); color: var(--text-mute); text-align: center; }
