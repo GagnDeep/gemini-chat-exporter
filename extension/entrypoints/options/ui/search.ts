@@ -14,8 +14,7 @@ import type { Segment, SearchHit, SearchMode } from "@/lib/types";
 import { cosineSim, getEmbeddings } from "./embeddings";
 import { SearchIndex, type RankedSeg } from "./searchIndex";
 import { rankTerms, type ParsedQuery } from "./query";
-
-const SNIPPET_RADIUS = 120;
+import { bestPassage } from "./passageMatch";
 
 export interface SearchContext {
   index: SearchIndex;
@@ -34,30 +33,16 @@ export interface SearchOutcome {
 }
 
 // ---------------------------------------------------------------------------
-// Snippets — center on the best matched span, expand to sentence boundaries.
+// Snippets — the single best-matching passage (shared with the arrival highlight
+// via bestPassage), so a semantic hit shows the *relevant* sentence rather than
+// the paragraph head, and the card bolds the same words the reader will mark.
 // ---------------------------------------------------------------------------
 
-function makeSnippet(text: string, queryText: string): string {
-  const terms = queryText.trim().toLowerCase().split(/\s+/).filter((t) => t.length >= 2);
-  const lower = text.toLowerCase();
-  let best = -1;
-  let bestLen = 0;
-  for (const term of terms) {
-    const i = lower.indexOf(term);
-    if (i !== -1 && (best === -1 || i < best)) { best = i; bestLen = term.length; }
-  }
-  if (best === -1) {
-    const head = text.slice(0, SNIPPET_RADIUS * 2).trim();
-    return head + (text.length > head.length ? "…" : "");
-  }
-  let start = Math.max(0, best - SNIPPET_RADIUS);
-  let end = Math.min(text.length, best + bestLen + SNIPPET_RADIUS);
-  // Expand to the nearest sentence boundaries for readable context.
-  const sentStart = text.lastIndexOf(". ", best);
-  if (sentStart !== -1 && best - sentStart < SNIPPET_RADIUS * 1.5) start = sentStart + 2;
-  const sentEnd = text.indexOf(". ", end);
-  if (sentEnd !== -1 && sentEnd - end < SNIPPET_RADIUS) end = sentEnd + 1;
-  return (start > 0 ? "…" : "") + text.slice(start, end).trim() + (end < text.length ? "…" : "");
+function makeSnippet(text: string, queryText: string, matchedTerms?: string[]): string {
+  const clean = (text || "").trim();
+  if (!clean) return "";
+  const p = bestPassage(clean, queryText, { salientTerms: matchedTerms });
+  return (p.startOffset > 0 ? "…" : "") + p.text + (p.endOffset < clean.length ? "…" : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +83,39 @@ function fieldHasTerm(seg: Segment, role: "question" | "answer", terms: string[]
   return terms.some((t) => hay.includes(t));
 }
 
+/** Content-bearing query words (≥3 chars, non-stopword) — the semantic fallback
+ *  seed when no literal ranking term appears in the segment. */
+function salientQueryTerms(text: string): string[] {
+  return [...new Set(text.toLowerCase().match(/[a-z0-9][a-z0-9'+_-]{2,}/g) || [])]
+    .filter((w) => !HL_STOPWORDS.has(w));
+}
+
+/**
+ * Which surface words actually hit this segment, and in which field. Feeds
+ * SearchHit.matchedTerms/field so the arrival highlight (and the result card)
+ * marks exactly what matched. For semantic hits — where the literal ranking
+ * terms may not appear — we fall back to the query's salient words so the
+ * destination still has something precise to highlight.
+ */
+function matchEvidence(
+  seg: Segment,
+  q: ParsedQuery,
+  terms: string[],
+): { matchedTerms: string[]; field?: "question" | "answer" } {
+  const qLower = seg.question.toLowerCase();
+  const aLower = seg.answerText.toLowerCase();
+  const inQ = terms.filter((t) => qLower.includes(t));
+  const inA = terms.filter((t) => aLower.includes(t));
+  const matched = [...new Set([...inA, ...inQ])];
+  const field: "question" | "answer" | undefined = q.role
+    ? q.role
+    : inA.length >= inQ.length
+      ? (inA.length ? "answer" : undefined)
+      : "question";
+  const matchedTerms = matched.length ? matched : salientQueryTerms(q.text);
+  return { matchedTerms, field };
+}
+
 // ---------------------------------------------------------------------------
 // Semantic pass
 // ---------------------------------------------------------------------------
@@ -129,13 +147,18 @@ export async function runSearch(mode: SearchMode, q: ParsedQuery, ctx: SearchCon
       .filter((s) => candidateIds.has(s.id))
       .sort((a, b) => (b.scrapedAt || "").localeCompare(a.scrapedAt || ""))
       .slice(0, 120)
-      .map((seg) => ({ segment: seg, score: 1, snippet: makeSnippet(roleText(seg, q.role), q.text) }));
+      .map((seg) => ({ segment: seg, score: 1, snippet: makeSnippet(roleText(seg, q.role), q.text), matchedTerms: [], field: q.role }));
     return { hits, rankedBy: "keyword", semanticUsed: false };
   }
 
   const toHits = (list: RankedSeg[]): SearchHit[] => {
     const max = Math.max(...list.map((r) => r.score), 1e-9);
-    return list.map((r) => ({ segment: r.segment, score: r.score / max, snippet: makeSnippet(roleText(r.segment, q.role), q.text) }));
+    return list.map((r) => {
+      const ev = matchEvidence(r.segment, q, terms);
+      // Snippet from the field that actually matched, centred on the passage.
+      const snippet = makeSnippet(roleText(r.segment, ev.field ?? q.role), q.text, ev.matchedTerms);
+      return { segment: r.segment, score: r.score / max, snippet, matchedTerms: ev.matchedTerms, field: ev.field };
+    });
   };
 
   if (mode === "keyword") {
@@ -222,6 +245,23 @@ export function highlight(text: string, queryText: string): string {
 export function highlightSemantic(text: string, queryText: string): string {
   const terms = queryText.trim().toLowerCase().split(/\s+/).filter((t) => t.length >= 4 && !HL_STOPWORDS.has(t));
   return terms.length ? highlight(text, terms.join(" ")) : esc(text);
+}
+
+/** Highlight a card using the hit's *matched* surface words (what the reader
+ *  will mark on arrival), so the card and the destination agree. Falls back to
+ *  the raw query when a hit carries no matched terms. */
+export function highlightMatched(text: string, hit: SearchHit, fallbackQuery: string): string {
+  const terms = hit.matchedTerms && hit.matchedTerms.length ? hit.matchedTerms.join(" ") : fallbackQuery;
+  return terms.trim() ? highlight(text, terms) : esc(text);
+}
+
+/** True when the hit shares no literal query word with its segment — i.e. it was
+ *  surfaced by meaning, not by an exact word. Drives the "≈ meaning" card tag. */
+export function isApproxHit(hit: SearchHit, queryText: string): boolean {
+  const qterms = queryText.trim().toLowerCase().split(/\s+/).filter((t) => t.length >= 2 && !HL_STOPWORDS.has(t));
+  if (!qterms.length) return false;
+  const hay = `${hit.segment.question} ${hit.segment.answerText}`.toLowerCase();
+  return !qterms.some((t) => hay.includes(t));
 }
 
 export interface ResultGroup {

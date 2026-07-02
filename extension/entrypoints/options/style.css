@@ -288,11 +288,15 @@ mark.hl { background: transparent; color: inherit; font-weight: 700; padding: 0;
 }
 .chat-head .ct { font-weight: 600; font-size: var(--fs-md); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.turn { padding: 22px 0; border-bottom: 1px solid var(--border-soft); }
+.turn { padding: 22px 0; border-bottom: 1px solid var(--border-soft); scroll-margin-top: 88px; }
 .turn:last-child { border-bottom: none; }
 /* Skip rendering/layout of off-screen turns in long chats (kept in the DOM, so
    find marks, outline anchors, copy buttons and scroll-to-id all still work). */
 .turn.cv { content-visibility: auto; contain-intrinsic-size: auto 600px; }
+/* Temporarily force real layout on a jump target + its neighbours so the
+   content-visibility height estimate can't misplace the scroll (must follow
+   .turn.cv to win on equal specificity). */
+.turn.cv-open { content-visibility: visible; contain-intrinsic-size: auto; }
 .q-row { display: flex; justify-content: flex-end; margin-bottom: 16px; }
 .q-bubble {
   background: var(--user-bubble); color: var(--text);
@@ -325,9 +329,22 @@ mark.hl { background: transparent; color: inherit; font-weight: 700; padding: 0;
 .turn.target { animation: flash 1.6s ease; border-radius: 12px; }
 .answer .target { animation: flash 1.6s ease; border-radius: 6px; }
 @keyframes flash {
-  0% { background: rgba(138,180,248,0.18); }
+  0% { background: rgba(138,180,248,0.32); }
+  60% { background: rgba(138,180,248,0.18); }
   100% { background: transparent; }
 }
+/* Persistent "arrived" marker on a search/jump target — an accent left rail plus
+   a faint tint. Unlike the flash it stays until the user navigates find, steps
+   matches, or a new jump lands, so it survives reduced-motion (which disables the
+   flash animation) and remains a reliable "you are here" cue. */
+.turn.arrived { border-radius: 12px; background: linear-gradient(90deg, rgba(138,180,248,0.09), transparent 46%); }
+.turn.arrived::before {
+  content: ""; position: absolute; left: -12px; top: 14px; bottom: 14px; width: 3px;
+  border-radius: 2px; background: var(--accent);
+}
+/* The reading column is a programmatic focus target (focus returns here after
+   closing find / an overlay jump); it shouldn't paint a focus ring. */
+.reader-col:focus { outline: none; }
 
 /* settings ---------------------------------------------------------------- */
 .settings { padding: 28px 0 60px; }
@@ -650,6 +667,14 @@ html[data-theme="light"] .hljs-title, html[data-theme="light"] .hljs-tag { color
 .gh-q { font-size: 12px; color: var(--text-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gh-snip { font-size: 13px; line-height: 1.5; }
 .gh-score { flex: none; font-size: 11px; color: var(--accent); margin-top: 2px; }
+/* match-context tags on a result card: which field matched (Q/A) + ≈meaning. */
+.gh-tags { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+.gh-field { flex: none; font-size: 10px; font-weight: 700; line-height: 15px; min-width: 15px; height: 15px; text-align: center; border-radius: 4px; padding: 0 3px; }
+.gh-field.question { background: var(--bg-elev-2); color: var(--text-mute); }
+.gh-field.answer { background: var(--accent-soft, var(--bg-elev-2)); color: var(--accent); }
+.gh-approx { font-size: 10px; color: var(--text-mute); background: var(--bg-elev-2); border-radius: 99px; padding: 1px 7px; }
+.cs-card-head .gh-field { margin-left: 2px; }
+.cs-card-head .gh-approx { margin-left: 2px; }
 
 /* browse view + chip clouds ---------------------------------------------- */
 .browse-stats { color: var(--text-mute); font-size: 13px; margin: -8px 0 12px; }
@@ -667,6 +692,15 @@ html[data-theme="light"] .hljs-title, html[data-theme="light"] .hljs-tag { color
 .kind-dot.person { background: #82aaff; }
 .kind-dot.org { background: #c792ea; }
 .kind-dot.place { background: #a5d6a7; }
+/* entity chip = jump-in-chat (main) + a small search-archive affordance. */
+.entity-chip { display: inline-flex; align-items: stretch; border: 1px solid var(--border); border-radius: 99px; overflow: hidden; }
+.entity-chip .cloud-chip.ent-main { border: none; border-radius: 0; background: var(--bg-elev); }
+.entity-chip .ent-search {
+  border: none; border-left: 1px solid var(--border); background: var(--bg-elev); color: var(--text-mute);
+  padding: 0 8px; display: inline-flex; align-items: center; cursor: pointer;
+}
+.entity-chip:hover { border-color: var(--accent); }
+.entity-chip .ent-search:hover { background: var(--bg-hover); color: var(--accent); }
 
 .link-group { margin-top: 12px; }
 .link-domain { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }

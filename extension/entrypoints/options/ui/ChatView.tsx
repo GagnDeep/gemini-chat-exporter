@@ -5,6 +5,7 @@ import { useChats, useChatMeta } from "./store";
 import { sanitizeAnswerHtml } from "./sanitize";
 import { useInChatFind, type FindMode } from "./useInChatFind";
 import { salientTerms } from "./findHighlight";
+import { passageMarkTerms } from "./passageMatch";
 import { InsightsPanel } from "./InsightsPanel";
 import { ChatSearchOverlay } from "./ChatSearchOverlay";
 import { Outline } from "./Outline";
@@ -18,6 +19,7 @@ import { exportEpub, exportMarkdown } from "./exporters";
 import { cosineSim } from "./embeddings";
 import { JobBanner } from "./JobBanner";
 import { navigate, chatLink } from "./App";
+import { showToast } from "./toast";
 import * as I from "./icons";
 
 /** Dock default: remembered choice, else collapsed (false) on every viewport. */
@@ -25,7 +27,12 @@ function dockDefault(key: string): boolean {
   return localStorage.getItem(key) === "1";
 }
 
-/** Map a global/overlay SearchMode to the quick-find mode used in the reader. */
+/** Map a global/overlay SearchMode to the quick-find mode used in the reader.
+ *  Note: hybrid maps to "exact" for the *marking engine*, but the arrival term
+ *  seeding (see the arrival effect) augments the exact terms with passage-derived
+ *  words present in the target turn — so a hybrid/semantic match that shares no
+ *  literal word with the query still highlights, rather than collapsing to a
+ *  literal find that marks nothing. */
 function modeToFind(mode?: string): FindMode {
   if (mode === "semantic") return "meaning";
   if (mode === "fuzzy") return "fuzzy";
@@ -37,12 +44,11 @@ function findToMode(mode: FindMode): SearchMode {
   return "keyword";
 }
 
-export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?: number; query?: string; mode?: string }) {
+export function ChatView({ chatId, turn, query, mode, terms }: { chatId: string; turn?: number; query?: string; mode?: string; terms?: string[] }) {
   const chats = useChats();
   const meta = useChatMeta();
   const chat = useMemo(() => chats.find((c) => c.id === chatId), [chats, chatId]);
   const bodyRef = useRef<HTMLDivElement>(null);
-  const scrolledRef = useRef(false);
   const cs = useChatSearch(chat);
   // Owns the buildable vector index (all chats — the hook prunes vectors outside
   // its segment set, so it must see every chat, not just this one).
@@ -63,8 +69,15 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
   const [cur, setCur] = useState(0);
   const findInputRef = useRef<HTMLInputElement>(null);
   const findInitRef = useRef(false);
-  // Turn to land on when matches/hits next populate (set by overlay jumps).
-  const jumpTurnRef = useRef<number | null>(null);
+  // The pending jump target + its match evidence (deep-link OR overlay). matchedTerms
+  // let the destination highlight exactly what matched — even for semantic hits.
+  const jumpHitRef = useRef<{ turnIndex: number; matchedTerms?: string[]; mode?: string; query?: string } | null>(null);
+  // Bumped on every new navigation target so arrival re-fires even for same-chat
+  // re-links (the reader doesn't remount when only the turn changes).
+  const [navSeq, setNavSeq] = useState(0);
+  // While an arrival scroll is in flight, the active-hit effect must not also
+  // scroll (they fought on mount and caused drift). It still applies find-cur.
+  const suppressHitScrollRef = useRef(false);
   // Meaning-mode (semantic) navigation targets — ranked turns, set async.
   const [meaningHits, setMeaningHits] = useState<{ turnIndex: number; score: number }[]>([]);
 
@@ -114,7 +127,7 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
   // In meaning mode we still mark salient query words inline (so context is
   // visible), but navigation/stepping is driven by the semantic hit turns below.
   const findQuery = findOpen && findTerm.trim()
-    ? (isMeaning ? salientTerms(findTerm).join(" ") : findTerm)
+    ? (isMeaning ? (salientTerms(findTerm).join(" ") || findTerm.trim()) : findTerm)
     : "";
   // Match state is derived from chat *content* (not live DOM), so it survives
   // re-renders and chat navigation. Empty query when closed → no work done.
@@ -146,13 +159,65 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
   const turnCount = chat?.turns.length ?? 0;
   const optimize = turnCount > 30;
 
-  // Scroll to a turn by id (browser renders content-visibility turns on demand).
-  const scrollToTurn = useCallback((turnIndex: number, flash = false) => {
+  const prefersReducedMotion = () =>
+    typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+
+  // Remove the persistent "arrived" accent marker (used once the user navigates
+  // find, steps matches, or a new jump lands).
+  const clearArrived = useCallback(() => {
+    bodyRef.current?.querySelectorAll(".turn.arrived").forEach((n) => n.classList.remove("arrived"));
+  }, []);
+
+  // Return keyboard focus to the reading column (e.g. after closing find or an
+  // overlay jump) so it isn't stranded on an element that just unmounted.
+  const focusReader = useCallback(() => {
+    setTimeout(() => bodyRef.current?.focus({ preventScroll: true }), 0);
+  }, []);
+
+  // Close find and hand focus back to the reader.
+  const closeFind = useCallback(() => { setFindOpen(false); focusReader(); }, [focusReader]);
+
+  // Reliable scroll to a turn by id. Off-screen turns use a `content-visibility`
+  // height *estimate* which mis-places the scroll on long chats; we force real
+  // heights on the target + neighbours first, then re-assert the scroll across a
+  // frame + a short delay to correct residual drift. Respects reduced-motion.
+  //  • flash   — brief motion accent (disabled by reduced-motion CSS).
+  //  • arrived — persistent accent marker on the target (search landing).
+  const scrollToTurn = useCallback((turnIndex: number, flash = false, arrived = false) => {
+    const container = bodyRef.current;
     const el = document.getElementById(`turn-${turnIndex}`);
     if (!el) return;
-    el.scrollIntoView({ block: "center", behavior: "smooth" });
-    if (flash) { el.classList.add("target"); setTimeout(() => el.classList.remove("target"), 1400); }
+    if (arrived) { container?.querySelectorAll(".turn.arrived").forEach((n) => n.classList.remove("arrived")); el.classList.add("arrived"); }
+    // Give the target + immediate neighbours real layout so offsets are correct.
+    container?.querySelectorAll(".cv-open").forEach((n) => n.classList.remove("cv-open"));
+    for (const i of [turnIndex - 1, turnIndex, turnIndex + 1]) {
+      const n = document.getElementById(`turn-${i}`);
+      if (n?.classList.contains("cv")) n.classList.add("cv-open");
+    }
+    const behavior: ScrollBehavior = prefersReducedMotion() ? "auto" : "smooth";
+    const doScroll = () => el.scrollIntoView({ block: "center", behavior });
+    if (flash) { el.classList.add("target"); setTimeout(() => el.classList.remove("target"), 1600); }
+    doScroll();
+    requestAnimationFrame(doScroll);      // re-assert after first layout pass
+    setTimeout(doScroll, 240);            // and once more after content settles
   }, []);
+
+  // Plain question + answer text of a turn, for choosing the words to highlight.
+  const turnTextOf = useCallback((turnIndex: number): string => {
+    const t = chat?.turns.find((x) => x.index === turnIndex);
+    return t ? `${t.question || ""}\n${t.answerText || ""}` : "";
+  }, [chat]);
+
+  // Highlight + scroll to an entity's / topic's occurrences in THIS chat (from the
+  // insights panel). Routes through the arrival controller so it gets the same
+  // highlight + persistent marker as a search landing.
+  const jumpToText = useCallback((term: string) => {
+    const t = term.trim();
+    if (!chat || !t) return;
+    const tgt = chat.turns.find((x) => `${x.question || ""}\n${x.answerText || ""}`.toLowerCase().includes(t.toLowerCase()));
+    if (tgt) { jumpHitRef.current = { turnIndex: tgt.index, matchedTerms: [t], mode: "keyword", query: t }; setNavSeq((s) => s + 1); }
+    else showToast(`“${t}” isn’t in this chat`, "info");
+  }, [chat]);
 
   // Scroll to a specific answer section (outline jump).
   const scrollToSection = useCallback((_turnIndex: number, sectionId: string) => {
@@ -172,21 +237,49 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
   const prevChat = myIdx > 0 ? ordered[myIdx - 1] : undefined;
   const nextChat = myIdx >= 0 && myIdx < ordered.length - 1 ? ordered[myIdx + 1] : undefined;
 
-  // Always scroll to + flash the deep-linked turn once on arrival. Flashing even
-  // when find is open confirms the location for semantic/fuzzy hits whose literal
-  // term may not appear in the turn (so nothing would otherwise highlight).
+  // Arm an arrival whenever the deep-link target (turn/query/terms/mode) changes.
+  // Because these are effect deps — not a mount-only one-shot — a second result
+  // in the SAME chat re-arms and re-scrolls (the reader doesn't remount when only
+  // the turn changes). `terms` carries the ranker's matched words from the URL.
   useEffect(() => {
-    if (!chat || turn == null || scrolledRef.current) return;
-    scrolledRef.current = true;
-    // Small defer so the turns have painted before we scroll.
-    const id = setTimeout(() => scrollToTurn(turn, true), 60);
-    return () => clearTimeout(id);
-  }, [chat, turn, scrollToTurn]);
+    const hasQuery = !!(query && query.trim());
+    if (turn == null && !hasQuery) return;
+    jumpHitRef.current = turn == null ? null : { turnIndex: turn, matchedTerms: terms, mode };
+    setNavSeq((s) => s + 1);
+  }, [turn, query, mode, (terms || []).join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // If we arrived from a search, open find pre-filled with the query + mode.
+  // Single arrival controller: open find, seed the highlight terms so the target
+  // turn always marks *something* (literal words when present, else the best
+  // passage's own words for semantic hits), then scroll with a persistent marker.
   useEffect(() => {
-    if (query && query.trim()) { setFindOpen(true); setFindTerm(query); setFindMode(modeToFind(mode)); }
-  }, [query, mode]);
+    if (navSeq === 0 || !chat) return;
+    const j = jumpHitRef.current;
+    if (!j) { if (query) { setFindOpen(true); setFindMode(modeToFind(mode)); setFindTerm(query); } return; } // query, no turn
+    const target = j.turnIndex;
+    const effQuery = j.query ?? query ?? "";           // overlay carries its own query
+    // Only seed a highlight when there's actual search intent — a bare turn
+    // deep-link just scrolls + marks the turn, it shouldn't invent a highlight.
+    const hasIntent = !!(effQuery.trim() || (j.matchedTerms && j.matchedTerms.length));
+    if (hasIntent) {
+      const tt = turnTextOf(target);
+      const seed = j.matchedTerms?.length ? j.matchedTerms : (effQuery ? salientTerms(effQuery) : []);
+      const queryPresent = (effQuery ? salientTerms(effQuery) : []).some((t) => tt.toLowerCase().includes(t));
+      // Exact/keyword hits: show the literal query (its words are in the turn).
+      // Semantic hits: derive words that ARE in the turn so the highlight is real.
+      const marks = passageMarkTerms(tt, seed, effQuery || (j.matchedTerms || []).join(" "));
+      setFindOpen(true);
+      setFindMode(modeToFind(j.mode ?? mode));
+      setFindTerm(queryPresent && effQuery ? effQuery : (marks.join(" ") || effQuery || ""));
+      findInitRef.current = false;               // re-arm the cur seed for the new target
+    }
+    suppressHitScrollRef.current = true;         // arrival owns the scroll, not the hit effect
+    // Defer one tick so the target turn has painted before we measure/scroll.
+    const id = setTimeout(() => scrollToTurn(target, true, true), 50);
+    const release = setTimeout(() => { suppressHitScrollRef.current = false; }, 600);
+    return () => { clearTimeout(id); clearTimeout(release); };
+    // `!!chat` re-fires the pending arrival exactly once when the chat store
+    // resolves async (fresh deep-link load starts with chat === undefined).
+  }, [navSeq, !!chat]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep `cur` within range as the navigation set changes.
   useEffect(() => {
@@ -198,22 +291,22 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
   useEffect(() => { if (vindex.upToDate) setShowVectorPanel(false); }, [vindex.upToDate]);
 
   // When matches/hits first populate after a deep-link or an overlay jump, move
-  // `cur` to the hit in the target turn (jumpTurnRef takes priority over the
+  // `cur` to the hit in the target turn (the jump target takes priority over the
   // deep-linked turn). One-shot via findInitRef until the next target is set.
+  // Seeding to the target's own hit fixes the old bug where cur stayed at 0 and
+  // .find-cur landed on a different turn.
   useEffect(() => {
     if (findInitRef.current) return;
-    const target = jumpTurnRef.current ?? turn ?? null;
+    const target = jumpHitRef.current?.turnIndex ?? turn ?? null;
     if (isMeaning) {
       if (!meaningHits.length) return;
       findInitRef.current = true;
       if (target != null) { const i = meaningHits.findIndex((h) => h.turnIndex === target); if (i >= 0) setCur(i); }
-      jumpTurnRef.current = null;
       return;
     }
     if (!matches.length) return;
     findInitRef.current = true;
     if (target != null) { const i = matches.findIndex((m) => m.turnIndex === target); if (i >= 0) setCur(i); }
-    jumpTurnRef.current = null;
   }, [matches, meaningHits, turn, isMeaning]);
 
   // Move the "current" highlight + scroll it into view.
@@ -224,17 +317,24 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
   useEffect(() => {
     const container = bodyRef.current;
     if (!container) return;
-    container.querySelectorAll("mark.find-cur").forEach((m) => m.classList.remove("find-cur"));
+    container.querySelectorAll("mark.find-cur").forEach((m) => { m.classList.remove("find-cur"); m.removeAttribute("aria-current"); });
+    // During an arrival scroll the arrival controller owns scrolling; we still
+    // apply the current-hit class here but don't issue a competing scroll.
+    const owns = suppressHitScrollRef.current;
     if (isMeaning) {
       const h = meaningHits[cur];
-      if (h) scrollToTurn(h.turnIndex, true);
+      if (h && !owns) scrollToTurn(h.turnIndex, true);
       return;
     }
     if (!matches.length) return;
     const m = matches[cur];
     if (!m) return;
     const target = container.querySelector<HTMLElement>(`mark.find-hit[data-fi="${cur}"]`);
-    if (target) { target.classList.add("find-cur"); target.scrollIntoView({ block: "center", behavior: "smooth" }); }
+    if (target) {
+      target.classList.add("find-cur");
+      target.setAttribute("aria-current", "true");
+      if (!owns) target.scrollIntoView({ block: "center", behavior: prefersReducedMotion() ? "auto" : "smooth" });
+    }
   }, [cur, matches, meaningHits, isMeaning, find.perTurn, scrollToTurn]);
 
   // Shift the reading column so open docks don't overlap it (desktop only; CSS
@@ -272,9 +372,10 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         const code = pre.querySelector("code")?.textContent ?? pre.textContent ?? "";
-        void navigator.clipboard.writeText(code);
-        btn.textContent = "Copied";
-        setTimeout(() => (btn.textContent = "Copy"), 1200);
+        navigator.clipboard.writeText(code).then(
+          () => { btn.textContent = "Copied"; setTimeout(() => (btn.textContent = "Copy"), 1200); },
+          () => showToast("Couldn't copy code to clipboard", "err"),
+        );
       });
       pre.appendChild(btn);
     });
@@ -292,9 +393,10 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
         if (e.shiftKey) { setOverlayOpen(true); }
         else { setFindOpen(true); setTimeout(() => findInputRef.current?.focus(), 0); }
       }
-      else if (e.key === "Escape" && findOpen) { setFindOpen(false); }
+      else if (e.key === "Escape" && findOpen) { closeFind(); }
       else if (e.key.toLowerCase() === "n" && !typing && navLen) {
         e.preventDefault();
+        clearArrived();
         setCur((c) => (e.shiftKey ? (c - 1 + navLen) % navLen : (c + 1) % navLen));
       }
     };
@@ -324,8 +426,10 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
     setRenaming(false);
   };
 
-  const stepMatch = (dir: 1 | -1) =>
+  const stepMatch = (dir: 1 | -1) => {
+    clearArrived();
     setCur((c) => (navLen ? (c + dir + navLen) % navLen : 0));
+  };
 
   const renderTurn = (t: ChatTurn) => {
     const hl = find.active ? find.perTurn.get(t.index) : undefined;
@@ -333,7 +437,7 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
       <div className={"turn" + (optimize ? " cv" : "")} id={`turn-${t.index}`}>
         <div className="turn-actions">
           <button title="Find similar turns in this chat" aria-label="Find similar turns" onClick={() => void findSimilar(t.index)}><I.Brain size={15} /></button>
-          <button title="Copy answer" aria-label="Copy answer" onClick={() => void navigator.clipboard.writeText(t.answerText || "")}><I.Copy size={15} /></button>
+          <button title="Copy answer" aria-label="Copy answer" onClick={() => navigator.clipboard.writeText(t.answerText || "").then(() => showToast("Answer copied", "ok"), () => showToast("Couldn't copy to clipboard", "err"))}><I.Copy size={15} /></button>
         </div>
         {t.question && (
           <div className="q-row">
@@ -391,7 +495,7 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
             placeholder={isMeaning ? "Find by meaning…" : findMode === "fuzzy" ? "Find (typo-tolerant)…" : "Find in conversation…"}
             aria-label="Find in conversation"
             onChange={(e) => setFindTerm(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") stepMatch(e.shiftKey ? -1 : 1); if (e.key === "Escape") setFindOpen(false); }} />
+            onKeyDown={(e) => { if (e.key === "Enter") stepMatch(e.shiftKey ? -1 : 1); if (e.key === "Escape") closeFind(); }} />
           <div className="fb-modes" role="tablist" aria-label="Find mode">
             {(["exact", "fuzzy", "meaning"] as FindMode[]).map((m) => (
               <button key={m} role="tab" aria-selected={findMode === m}
@@ -402,7 +506,9 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
               </button>
             ))}
           </div>
-          <span className="fb-count">{navLen ? `${cur + 1}/${navLen}` : "0/0"}{isMeaning && navLen ? " passages" : ""}</span>
+          <span className="fb-count" role="status" aria-live="polite">
+            {navLen ? `${cur + 1} of ${navLen}${isMeaning ? " passages" : ""}` : "0 results"}
+          </span>
           <button title="Previous (Shift+N)" aria-label="Previous match" onClick={() => stepMatch(-1)}><I.Back size={14} /></button>
           <button title="Next (N)" aria-label="Next match" onClick={() => stepMatch(1)} style={{ transform: "rotate(180deg)" }}><I.Back size={14} /></button>
           {!isMeaning && (
@@ -411,7 +517,7 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
             </label>
           )}
           <button title="Advanced search (rich results)" aria-label="Advanced search" onClick={() => setOverlayOpen(true)}><I.List size={14} /></button>
-          <button title="Close (Esc)" aria-label="Close find" onClick={() => setFindOpen(false)}><I.Close size={14} /></button>
+          <button title="Close (Esc)" aria-label="Close find" onClick={closeFind}><I.Close size={14} /></button>
         </div>
       )}
 
@@ -427,18 +533,16 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
 
       {overlayOpen && (
         <ChatSearchOverlay chat={chat} initialQuery={findTerm} initialMode={findToMode(findMode)}
-          onJump={(turnIndex, m, q) => {
+          onJump={(hit, m, q) => {
             setOverlayOpen(false);
-            setFindTerm(q);
-            setFindMode(modeToFind(m));
-            setFindOpen(true);
-            // Re-arm the target effect so `cur` lands on the jumped turn once
-            // matches/hits recompute for the new term/mode.
-            jumpTurnRef.current = turnIndex;
-            findInitRef.current = false;
-            setTimeout(() => scrollToTurn(turnIndex, true), 40);
+            // Route through the single arrival controller: it seeds the highlight
+            // terms (matchedTerms from the hit), scrolls with a persistent marker,
+            // and re-arms the cur seed — identical to a global-search landing.
+            jumpHitRef.current = { turnIndex: hit.segment.turnIndex, matchedTerms: hit.matchedTerms, mode: m, query: q };
+            setNavSeq((s) => s + 1);
+            focusReader();
           }}
-          onClose={() => setOverlayOpen(false)} />
+          onClose={() => { setOverlayOpen(false); focusReader(); }} />
       )}
 
       {similar && (
@@ -463,13 +567,13 @@ export function ChatView({ chatId, turn, query, mode }: { chatId: string; turn?:
         </div>
       )}
 
-      {showInsights && <InsightsPanel chat={chat} onClose={() => setShowInsights(false)} />}
+      {showInsights && <InsightsPanel chat={chat} onClose={() => setShowInsights(false)} onJump={jumpToText} />}
       {showOutline && (
         <Outline chat={chat} sectionsByTurn={outlineData} onClose={() => setShowOutline(false)}
           onJumpTurn={(i) => scrollToTurn(i, true)} onJumpSection={scrollToSection} />
       )}
 
-      <div className="col" style={{ paddingTop: 8, paddingBottom: 60 }} ref={bodyRef}>
+      <div className="col reader-col" style={{ paddingTop: 8, paddingBottom: 60 }} ref={bodyRef} tabIndex={-1}>
         {(showVectorPanel || (isMeaning && findOpen && findTerm.trim().length > 0 && !cs.vectorsReady && !vindex.upToDate && vindex.total > 0)) && !vectorDismissed && (
           <VectorPrompt index={vindex} onClose={() => { setShowVectorPanel(false); setVectorDismissed(true); }} />
         )}

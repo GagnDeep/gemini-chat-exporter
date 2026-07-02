@@ -13,24 +13,32 @@ import * as I from "./icons";
 type Route =
   | { view: "search" }
   | { view: "browse" }
-  | { view: "chat"; chatId: string; turn?: number; query?: string; mode?: string }
+  | { view: "chat"; chatId: string; turn?: number; query?: string; mode?: string; terms?: string[] }
   | { view: "settings" };
 
 function parseHash(): Route {
   const h = window.location.hash.replace(/^#\/?/, "");
   if (h.startsWith("chat/")) {
-    const rest = decodeURIComponent(h.slice("chat/".length));
+    // Split on the raw (still-encoded) string, THEN decode each token — so a "~"
+    // inside a query/term value (encoded as %7E by chatLink) can't be mistaken
+    // for the token separator.
+    const rest = h.slice("chat/".length);
     const tokens = rest.split("~");
-    const chatId = tokens.shift() || "";
+    const chatId = decodeURIComponent(tokens.shift() || "");
     let turn: number | undefined;
     let query: string | undefined;
     let mode: string | undefined;
+    let terms: string[] | undefined;
     for (const tk of tokens) {
       if (tk.startsWith("q=")) query = decodeURIComponent(tk.slice(2));
       else if (tk.startsWith("m=")) mode = decodeURIComponent(tk.slice(2));
+      else if (tk.startsWith("t=")) {
+        terms = decodeURIComponent(tk.slice(2)).split(",").map((s) => s.trim()).filter(Boolean);
+        if (!terms.length) terms = undefined;
+      }
       else if (tk !== "" && Number.isFinite(Number(tk))) turn = Number(tk);
     }
-    if (chatId) return { view: "chat", chatId, turn, query, mode };
+    if (chatId) return { view: "chat", chatId, turn, query, mode, terms };
   }
   if (h.startsWith("settings")) return { view: "settings" };
   if (h.startsWith("browse")) return { view: "browse" };
@@ -50,11 +58,19 @@ export function searchFor(query: string): void {
 
 /** Build a chat deep-link that carries an optional turn + search query + the
  *  search mode (so the chat can highlight the match the same way it ranked). */
-export function chatLink(chatId: string, turn?: number, query?: string, mode?: string): string {
-  let s = `#/chat/${encodeURIComponent(chatId)}`;
+export function chatLink(chatId: string, turn?: number, query?: string, mode?: string, terms?: string[]): string {
+  // encodeURIComponent leaves "~" (an unreserved char) literal, which would
+  // collide with the token separator — so encode it too.
+  const enc = (v: string) => encodeURIComponent(v).replace(/~/g, "%7E");
+  let s = `#/chat/${enc(chatId)}`;
   if (turn != null) s += `~${turn}`;
-  if (query && query.trim()) s += `~q=${encodeURIComponent(query.trim())}`;
-  if (mode) s += `~m=${encodeURIComponent(mode)}`;
+  if (query && query.trim()) s += `~q=${enc(query.trim())}`;
+  if (mode) s += `~m=${enc(mode)}`;
+  // The matched surface words the ranker actually hit — so a fresh page load can
+  // still highlight the precise match (esp. semantic hits whose words aren't in
+  // the raw query). Kept compact + comma-joined.
+  const t = (terms || []).map((x) => x.trim()).filter(Boolean).slice(0, 12);
+  if (t.length) s += `~t=${enc(t.join(","))}`;
   return s;
 }
 
@@ -196,7 +212,7 @@ export function App() {
       <main className="main" key={route.view + ("chatId" in route ? route.chatId : "")}>
         {route.view === "search" && <SearchView />}
         {route.view === "browse" && <BrowseView />}
-        {route.view === "chat" && <ChatView chatId={route.chatId} turn={route.turn} query={route.query} mode={route.mode} />}
+        {route.view === "chat" && <ChatView chatId={route.chatId} turn={route.turn} query={route.query} mode={route.mode} terms={route.terms} />}
         {route.view === "settings" && <SettingsView />}
       </main>
 

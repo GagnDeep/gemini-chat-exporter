@@ -16,7 +16,6 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "@tanstack/react-virtual": "^3.14.4",
     "compromise": "^14.15.1",
     "fuse.js": "^7.4.2",
     "highlight.js": "^11.11.1",

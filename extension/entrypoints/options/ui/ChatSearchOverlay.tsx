@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { Chat, SearchHit, SearchMode } from "@/lib/types";
 import { useChatSearch } from "./useChatSearch";
-import { highlight, highlightSemantic } from "./search";
+import { highlightMatched, isApproxHit } from "./search";
 import * as I from "./icons";
 
 const MODES: { id: SearchMode; label: string; icon: React.ReactNode; hint: string }[] = [
@@ -21,7 +21,9 @@ export function ChatSearchOverlay({
   chat: Chat;
   initialQuery: string;
   initialMode?: SearchMode;
-  onJump: (turnIndex: number, mode: SearchMode, query: string) => void;
+  /** The full hit is passed in-process (no URL length limit) so the destination
+   *  can highlight exactly what matched — matchedTerms + field included. */
+  onJump: (hit: SearchHit, mode: SearchMode, query: string) => void;
   onClose: () => void;
 }) {
   const cs = useChatSearch(chat);
@@ -65,9 +67,8 @@ export function ChatSearchOverlay({
   }, [query, mode, cs.search]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const showPct = mode === "semantic" || mode === "hybrid";
-  const hl = (text: string) => (mode === "semantic" ? highlightSemantic(text, query) : highlight(text, query));
 
-  const jump = (h: SearchHit) => onJump(h.segment.turnIndex, mode, query.trim());
+  const jump = (h: SearchHit) => onJump(h, mode, query.trim());
 
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") { e.preventDefault(); onClose(); }
@@ -118,19 +119,24 @@ export function ChatSearchOverlay({
           {!searching && query.trim() && sortedHits.length === 0 && (
             <div className="empty" style={{ padding: 28 }}>No matches. Try Smart or Meaning mode for broader results.</div>
           )}
-          {sortedHits.map((h, i) => (
+          {sortedHits.map((h, i) => {
+            const approx = isApproxHit(h, query);
+            return (
             <button key={h.segment.id} className={"cs-card" + (i === sel ? " on" : "")}
               onMouseEnter={() => setSel(i)} onClick={() => jump(h)}>
               <div className="cs-card-head">
                 <span className="cs-turn">#{h.segment.turnIndex + 1}</span>
                 {h.segment.question && (
-                  <span className="cs-q" dangerouslySetInnerHTML={{ __html: hl(clip(h.segment.question, 140)) }} />
+                  <span className="cs-q" dangerouslySetInnerHTML={{ __html: highlightMatched(clip(h.segment.question, 140), h, query) }} />
                 )}
+                {h.field && <span className={"gh-field " + h.field} title={h.field === "answer" ? "Matched in the answer" : "Matched in the question"}>{h.field === "answer" ? "A" : "Q"}</span>}
+                {approx && <span className="gh-approx" title="Matched by meaning, not exact words">≈ meaning</span>}
                 {showPct && <span className="cs-score">{Math.round(h.score * 100)}%</span>}
               </div>
-              <div className="cs-snip" dangerouslySetInnerHTML={{ __html: hl(h.snippet) }} />
+              <div className="cs-snip" dangerouslySetInnerHTML={{ __html: highlightMatched(h.snippet, h, query) }} />
             </button>
-          ))}
+            );
+          })}
         </div>
 
         <div className="modal-foot">

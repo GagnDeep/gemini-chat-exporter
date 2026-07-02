@@ -1,34 +1,52 @@
 import React, { useMemo, useState } from "react";
 import type { Chat } from "@/lib/types";
-import { chatInsights } from "@/lib/insights";
+import { chatInsights, type Entity } from "@/lib/insights";
 import { searchFor } from "./App";
+import { showToast } from "./toast";
 import * as I from "./icons";
 
-type Tab = "overview" | "links" | "people" | "topics" | "code" | "emails";
+type Tab = "overview" | "links" | "people" | "orgs" | "places" | "topics" | "code" | "emails";
 
 /** Per-chat insights as a docked side panel with tabs: stats overview plus
- *  dedicated tabs to browse every link (with context), person/name, topic, code
- *  block and email extracted from the conversation. Derived from chat content. */
-export function InsightsPanel({ chat, onClose }: { chat: Chat; onClose: () => void }) {
+ *  dedicated tabs to browse links, typed named entities (People / Organizations /
+ *  Places, via compromise), topics, code blocks and emails. Clicking an entity or
+ *  topic highlights & scrolls to its occurrences IN THIS CHAT (primary); a small
+ *  secondary control searches the whole archive. */
+export function InsightsPanel({ chat, onClose, onJump }: { chat: Chat; onClose: () => void; onJump?: (term: string) => void }) {
   const ins = useMemo(() => chatInsights(chat), [chat]);
   const [tab, setTab] = useState<Tab>("overview");
   const [copied, setCopied] = useState<number | null>(null);
 
+  const people = useMemo(() => ins.entities.filter((e) => e.kind === "person"), [ins.entities]);
+  const orgs = useMemo(() => ins.entities.filter((e) => e.kind === "org"), [ins.entities]);
+  const places = useMemo(() => ins.entities.filter((e) => e.kind === "place"), [ins.entities]);
+  const other = useMemo(() => ins.entities.filter((e) => !e.kind || e.kind === "name"), [ins.entities]);
+  // Uncategorized names fall under People so nothing is lost.
+  const peopleAll = useMemo(() => [...people, ...other], [people, other]);
+
   const totalLinks = ins.links.reduce((n, g) => n + g.count, 0);
-  const tabs: { id: Tab; label: string; count?: number }[] = [
+  const allTabs: { id: Tab; label: string; count?: number }[] = [
     { id: "overview", label: "Overview" },
     { id: "links", label: "Links", count: totalLinks },
-    { id: "people", label: "People", count: ins.entities.length },
+    { id: "people", label: "People", count: peopleAll.length },
+    { id: "orgs", label: "Orgs", count: orgs.length },
+    { id: "places", label: "Places", count: places.length },
     { id: "topics", label: "Topics", count: ins.topics.length },
     { id: "code", label: "Code", count: ins.code.length },
     { id: "emails", label: "Emails", count: ins.emails.length },
   ];
+  const tabs = allTabs.filter((t) => t.count == null || t.count > 0 || t.id === "overview");
+  // If the active tab has no items any more (e.g. content changed), fall back.
+  const activeTab = tabs.some((t) => t.id === tab) ? tab : "overview";
 
   const copyCode = (i: number, code: string) => {
-    void navigator.clipboard.writeText(code);
-    setCopied(i);
-    setTimeout(() => setCopied((c) => (c === i ? null : c)), 1200);
+    navigator.clipboard.writeText(code).then(
+      () => { setCopied(i); setTimeout(() => setCopied((c) => (c === i ? null : c)), 1200); },
+      () => showToast("Couldn't copy to clipboard", "err"),
+    );
   };
+
+  const jump = onJump ?? ((t: string) => searchFor(t));
 
   return (
     <aside className="insights dock" role="complementary" aria-label="Chat insights">
@@ -39,15 +57,15 @@ export function InsightsPanel({ chat, onClose }: { chat: Chat; onClose: () => vo
 
         <div className="ins-tabs" role="tablist">
           {tabs.map((t) => (
-            <button key={t.id} role="tab" aria-selected={tab === t.id}
-              className={"ins-tab" + (tab === t.id ? " on" : "")} onClick={() => setTab(t.id)}>
+            <button key={t.id} role="tab" aria-selected={activeTab === t.id}
+              className={"ins-tab" + (activeTab === t.id ? " on" : "")} onClick={() => setTab(t.id)}>
               {t.label}{t.count != null && <span className="mt-count">{t.count}</span>}
             </button>
           ))}
         </div>
 
         <div className="ins-body">
-          {tab === "overview" && (
+          {activeTab === "overview" && (
             <>
               <div className="ins-stats">
                 <Stat label="Q&A" value={ins.stats.turns} />
@@ -57,13 +75,13 @@ export function InsightsPanel({ chat, onClose }: { chat: Chat; onClose: () => vo
                 <Stat label="Longest answer" value={`${ins.stats.longestAnswerWords.toLocaleString()} w`} />
                 <Stat label="Code blocks" value={ins.code.length} />
                 <Stat label="Links" value={totalLinks} />
-                <Stat label="People" value={ins.entities.length} />
+                <Stat label="People" value={peopleAll.length} />
               </div>
               {ins.topics.length > 0 && (
                 <Section title="Top topics">
                   <div className="chip-cloud sm">
                     {ins.topics.slice(0, 12).map((t) => (
-                      <button key={t.term} className="cloud-chip" onClick={() => searchFor(t.term)}>{t.term}</button>
+                      <button key={t.term} className="cloud-chip" onClick={() => jump(t.term)} title={`Find “${t.term}” in this chat`}>{t.term}</button>
                     ))}
                   </div>
                 </Section>
@@ -71,7 +89,7 @@ export function InsightsPanel({ chat, onClose }: { chat: Chat; onClose: () => vo
             </>
           )}
 
-          {tab === "links" && (
+          {activeTab === "links" && (
             totalLinks === 0 ? <Empty>No links in this conversation.</Empty> :
             ins.links.map((g) => (
               <div className="link-group" key={g.domain}>
@@ -93,27 +111,20 @@ export function InsightsPanel({ chat, onClose }: { chat: Chat; onClose: () => vo
             ))
           )}
 
-          {tab === "people" && (
-            ins.entities.length === 0 ? <Empty>No people or named entities detected.</Empty> :
-            <div className="chip-cloud">
-              {ins.entities.map((e) => (
-                <button key={e.name} className="cloud-chip" onClick={() => searchFor(e.name)} title={`${e.kind ?? "name"} · ${e.count}× · search`}>
-                  {e.kind && <span className={"kind-dot " + e.kind} />}{e.name} <span className="chip-count">{e.count}</span>
-                </button>
-              ))}
-            </div>
-          )}
+          {activeTab === "people" && <EntityCloud entities={peopleAll} kind="person" onJump={jump} emptyLabel="No people detected." />}
+          {activeTab === "orgs" && <EntityCloud entities={orgs} kind="org" onJump={jump} emptyLabel="No organizations detected." />}
+          {activeTab === "places" && <EntityCloud entities={places} kind="place" onJump={jump} emptyLabel="No places detected." />}
 
-          {tab === "topics" && (
+          {activeTab === "topics" && (
             ins.topics.length === 0 ? <Empty>No topics extracted.</Empty> :
             <div className="chip-cloud">
               {ins.topics.map((t) => (
-                <button key={t.term} className="cloud-chip" onClick={() => searchFor(t.term)} title={`Search “${t.term}”`}>{t.term}</button>
+                <button key={t.term} className="cloud-chip" onClick={() => jump(t.term)} title={`Find “${t.term}” in this chat`}>{t.term}</button>
               ))}
             </div>
           )}
 
-          {tab === "code" && (
+          {activeTab === "code" && (
             ins.code.length === 0 ? <Empty>No code blocks in this conversation.</Empty> :
             ins.code.map((c, i) => (
               <div className="code-card" key={i}>
@@ -130,7 +141,7 @@ export function InsightsPanel({ chat, onClose }: { chat: Chat; onClose: () => vo
             ))
           )}
 
-          {tab === "emails" && (
+          {activeTab === "emails" && (
             ins.emails.length === 0 ? <Empty>No email addresses found.</Empty> :
             <div className="chip-cloud">
               {ins.emails.map((e) => <a key={e} className="cloud-chip" href={`mailto:${e}`}>{e}</a>)}
@@ -138,6 +149,26 @@ export function InsightsPanel({ chat, onClose }: { chat: Chat; onClose: () => vo
           )}
         </div>
     </aside>
+  );
+}
+
+/** A cloud of typed entities: each chip jumps to occurrences in the current chat;
+ *  a small ⌕ affordance searches the whole archive instead. */
+function EntityCloud({ entities, kind, onJump, emptyLabel }: { entities: Entity[]; kind: string; onJump: (t: string) => void; emptyLabel: string }) {
+  if (!entities.length) return <Empty>{emptyLabel}</Empty>;
+  return (
+    <div className="chip-cloud">
+      {entities.map((e) => (
+        <span key={e.name} className="entity-chip">
+          <button className="cloud-chip ent-main" onClick={() => onJump(e.name)} title={`Find “${e.name}” in this chat`}>
+            <span className={"kind-dot " + kind} />{e.name} <span className="chip-count">{e.count}</span>
+          </button>
+          <button className="ent-search" title="Search the whole archive" aria-label={`Search archive for ${e.name}`} onClick={() => searchFor(e.name)}>
+            <I.Search size={12} />
+          </button>
+        </span>
+      ))}
+    </div>
   );
 }
 

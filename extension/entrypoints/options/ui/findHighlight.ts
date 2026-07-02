@@ -25,8 +25,15 @@ export interface FindCounter {
 
 const CONTEXT_CHARS = 100;
 
+const FIND_TERM_CAP = 8;
+
 export function findTerms(query: string): string[] {
-  return [...new Set(query.trim().toLowerCase().split(/\s+/).filter((t) => t.length >= 2))];
+  const all = [...new Set(query.trim().toLowerCase().split(/\s+/).filter((t) => t.length >= 2))];
+  if (all.length <= FIND_TERM_CAP) return all;
+  // Long query: marking every word everywhere is noisy — keep only the salient
+  // (non-stopword) words, longest first, capped, so highlighting stays legible.
+  const salient = all.filter((t) => !FIND_STOPWORDS.has(t)).sort((a, b) => b.length - a.length).slice(0, FIND_TERM_CAP);
+  return salient.length ? salient : all.slice(0, FIND_TERM_CAP);
 }
 
 // --- Fuzzy (typo-tolerant) term expansion ---------------------------------

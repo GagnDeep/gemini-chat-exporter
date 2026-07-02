@@ -118,4 +118,13 @@ export interface SearchHit {
   score: number;
   /** Short snippet around the match for display. */
   snippet: string;
+  /**
+   * Surface words the ranker actually hit (BM25 matched tokens, Fuse match
+   * words, or the query's salient terms for semantic hits). Optional so nothing
+   * that builds a SearchHit by hand breaks. Drives the arrival highlight so the
+   * destination marks exactly what matched — even for semantic hits.
+   */
+  matchedTerms?: string[];
+  /** Which field the strongest match landed in, when known. */
+  field?: "question" | "answer";
 }
