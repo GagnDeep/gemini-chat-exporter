@@ -6,7 +6,7 @@ import { segmentsFromChats, shortDate, relativeTime } from "./segments";
 import { useSemanticIndex } from "./useSemanticIndex";
 import { SearchIndex, segmentsSignature } from "./searchIndex";
 import { parseQuery } from "./query";
-import { runSearch, highlight, highlightSemantic, groupByChat, type ResultGroup, type SearchContext } from "./search";
+import { runSearch, highlight, highlightMatched, isApproxHit, groupByChat, type ResultGroup, type SearchContext } from "./search";
 import { JobBanner } from "./JobBanner";
 import { VectorPrompt } from "./VectorPrompt";
 import { navigate, chatLink } from "./App";
@@ -139,10 +139,10 @@ export function SearchView() {
     return () => { cancelled = true; clearTimeout(t); };
   }, [parsed, mode, lexIndex, index.segments, index.embedded, pinnedIds, usesVectors, hasQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const open = (chatId: string, turn?: number) => {
+  const open = (chatId: string, turn?: number, terms?: string[]) => {
     saveRecent(query);
     setRecents(loadRecents());
-    navigate(chatLink(chatId, turn, parsed.text, mode));
+    navigate(chatLink(chatId, turn, parsed.text, mode, terms));
   };
 
   // Filter + group + sort.
@@ -160,7 +160,7 @@ export function SearchView() {
     else if (e.key === "Enter") {
       const g = groups[selected] || groups[0];
       const top = g?.hits[0];
-      if (top) open(top.segment.chatId, top.segment.turnIndex);
+      if (top) open(top.segment.chatId, top.segment.turnIndex, top.matchedTerms);
     }
   };
 
@@ -342,9 +342,11 @@ function clip(s: string, n: number): string {
 
 function GroupCard({
   group, query, mode, title, selected, onOpen,
-}: { group: ResultGroup; query: string; mode: SearchMode; title: string; selected?: boolean; onOpen: (chatId: string, turn: number) => void }) {
+}: { group: ResultGroup; query: string; mode: SearchMode; title: string; selected?: boolean; onOpen: (chatId: string, turn: number, terms?: string[]) => void }) {
   const [showAll, setShowAll] = useState(false);
-  const hl = (text: string) => (mode === "semantic" ? highlightSemantic(text, query) : highlight(text, query));
+  // Title uses the raw query; per-hit q/snippet bold the hit's own matched terms
+  // (== what the reader marks on arrival).
+  const hlTitle = (text: string) => highlight(text, query);
   const showPct = mode === "semantic" || mode === "hybrid";
   const CAP = 5;
   const visible = showAll ? group.hits : group.hits.slice(0, CAP);
@@ -352,9 +354,9 @@ function GroupCard({
   return (
     <div className={"group" + (selected ? " selected" : "")}>
       <div className="group-head2">
-        <button className="g-title-btn" onClick={() => onOpen(group.chatId, group.hits[0]!.segment.turnIndex)}>
+        <button className="g-title-btn" onClick={() => onOpen(group.chatId, group.hits[0]!.segment.turnIndex, group.hits[0]!.matchedTerms)}>
           <I.Msg size={15} />
-          <span className="g-title" dangerouslySetInnerHTML={{ __html: hl(title) }} />
+          <span className="g-title" dangerouslySetInnerHTML={{ __html: hlTitle(title) }} />
         </button>
         <span className="g-meta">
           {showPct && <span className="badge">{Math.round(group.score * 100)}%</span>}
@@ -362,18 +364,25 @@ function GroupCard({
         </span>
       </div>
       <div className="g-hits">
-        {visible.map((h) => (
-          <button key={h.segment.id} className="g-hit" onClick={() => onOpen(group.chatId, h.segment.turnIndex)}>
+        {visible.map((h) => {
+          const approx = isApproxHit(h, query);
+          return (
+          <button key={h.segment.id} className="g-hit" onClick={() => onOpen(group.chatId, h.segment.turnIndex, h.matchedTerms)}>
             <span className="gh-badge">#{h.segment.turnIndex + 1}</span>
             <span className="gh-body">
               {h.segment.question && (
-                <span className="gh-q" dangerouslySetInnerHTML={{ __html: hl(clip(h.segment.question, 110)) }} />
+                <span className="gh-q" dangerouslySetInnerHTML={{ __html: highlightMatched(clip(h.segment.question, 110), h, query) }} />
               )}
-              <span className="gh-snip" dangerouslySetInnerHTML={{ __html: hl(h.snippet) }} />
+              <span className="gh-snip" dangerouslySetInnerHTML={{ __html: highlightMatched(h.snippet, h, query) }} />
+              <span className="gh-tags">
+                {h.field && <span className={"gh-field " + h.field} title={h.field === "answer" ? "Matched in the answer" : "Matched in the question"}>{h.field === "answer" ? "A" : "Q"}</span>}
+                {approx && <span className="gh-approx" title="Matched by meaning, not exact words">≈ meaning</span>}
+              </span>
             </span>
             {showPct && <span className="gh-score">{Math.round(h.score * 100)}%</span>}
           </button>
-        ))}
+          );
+        })}
         {(hidden > 0 || showAll) && group.hits.length > CAP && (
           <button className="group-expand" onClick={() => setShowAll((v) => !v)}>
             <I.ChevDown size={14} /> {showAll ? "Show fewer" : `Show ${hidden} more match${hidden === 1 ? "" : "es"}`}

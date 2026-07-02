@@ -102,9 +102,17 @@ const STOPWORDS = new Set([
 
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
 const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
-// Capitalized multi-word proper-noun phrases (heuristic NER).
-const ENTITY_RE = /\b([A-Z][a-zA-Z0-9'’.-]+(?:\s+(?:of|the|and|de|van|von)\s+)?(?:\s+[A-Z][a-zA-Z0-9'’.-]+){0,3})\b/g;
 const WORD_RE = /[a-zA-Z0-9][a-zA-Z0-9'’+-]*/g;
+
+/** Cheap stable content hash (FNV-1a → base36). Local so lib/ stays standalone. */
+function hashText(str: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
 
 /** Strip HTML to plain text using the DOM (available in extension page/content contexts). */
 function htmlToText(html: string): string {
@@ -117,9 +125,63 @@ function htmlToText(html: string): string {
   }
 }
 
+/** Plain answer text with code blocks removed (so NER/topics never see code). */
+function proseFromHtml(html: string): string {
+  if (!html) return "";
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    doc.querySelectorAll("pre, code").forEach((el) => el.remove());
+    return doc.body.textContent || "";
+  } catch {
+    return html.replace(/<(pre|code)[\s\S]*?<\/\1>/gi, " ").replace(/<[^>]+>/g, " ");
+  }
+}
+
+/** Full turn text (question + whole answer, incl. code) — for word counts. */
 function turnText(t: ChatTurn): string {
   const answer = t.answerText || htmlToText(t.answerHtml);
   return `${t.question || ""}\n${answer}`;
+}
+
+/** Prose-only turn text for NER/topics/emails: code blocks removed, and URLs +
+ *  emails stripped so identifiers, links and addresses can't pollute the NER. */
+function proseTurnText(t: ChatTurn): string {
+  const answer = t.answerHtml ? proseFromHtml(t.answerHtml) : (t.answerText || "");
+  const text = `${t.question || ""}\n${answer}`;
+  return text.replace(URL_RE, " ").replace(EMAIL_RE, " ");
+}
+
+// --- Entity normalization / canonicalization ------------------------------
+// Fold possessives, whitespace variants and simple plurals so counts stop
+// fragmenting, while keeping a human display form separate from the merge key.
+
+function singularize(w: string): string {
+  if (w.length > 4 && /[^s]s$/.test(w) && !/(ss|us|is)$/.test(w)) return w.slice(0, -1);
+  return w;
+}
+
+/** Cleaned display form of a raw entity string. */
+function entityDisplay(raw: string): string {
+  return raw.trim().replace(/\s+/g, " ").replace(/[’']s\b/gi, "").replace(/^[.,;:'"’-]+|[.,;:'"’-]+$/g, "").trim();
+}
+
+/** Canonical merge key: lowercased, possessive/punct-stripped, last word
+ *  singularized, internal spaces squashed (so "Open AI" ≡ "OpenAI"). */
+function entityKey(raw: string): string {
+  const disp = entityDisplay(raw).toLowerCase().replace(/[’']/g, "");
+  const parts = disp.split(/\s+/).filter(Boolean);
+  if (!parts.length) return "";
+  parts[parts.length - 1] = singularize(parts[parts.length - 1]!);
+  return parts.join("");
+}
+
+/** Reject obvious NER noise (empty, numeric, or a single lowercase common word). */
+function isJunkEntity(display: string): boolean {
+  if (display.length < 2 || /^\d+$/.test(display)) return true;
+  const words = display.split(" ");
+  if (words.length < 2 && !/[A-Z]/.test(display)) return true; // lowercase single word
+  if (words.every((w) => STOPWORDS.has(w.toLowerCase()))) return true;
+  return false;
 }
 
 function domainOf(url: string): string {
@@ -169,7 +231,10 @@ function extractTurnLinks(t: ChatTurn, chat: Chat): LinkItem[] {
   let m: RegExpExecArray | null;
   URL_RE.lastIndex = 0;
   while ((m = URL_RE.exec(plain))) {
-    const url = m[0].replace(/[.,;:)]+$/, "");
+    // Strip trailing sentence punctuation, but only drop a closing paren when it's
+    // unbalanced (so URLs like ...(disambiguation) survive intact).
+    let url = m[0].replace(/[.,;:]+$/, "");
+    if (url.endsWith(")") && !url.includes("(")) url = url.replace(/\)+$/, "");
     if (seen.has(url)) continue;
     seen.add(url);
     out.push({
@@ -209,44 +274,65 @@ function groupLinks(links: LinkItem[]): DomainGroup[] {
   return [...map.values()].sort((a, b) => b.count - a.count);
 }
 
-/** High-quality NER via compromise — people, organizations, places. Used for a
- *  single chat (bounded work). Falls back silently to the regex tally on error. */
-function tallyEntitiesNLP(text: string, chatId: string, into: Map<string, Entity>) {
-  try {
-    const doc = nlp(text.slice(0, 200_000));
-    const add = (names: string[], kind: EntityKind) => {
-      for (const raw of names) {
-        const name = raw.trim().replace(/\s+/g, " ");
-        if (name.length < 2 || /^\d+$/.test(name)) continue;
-        const key = name.toLowerCase();
-        const e = into.get(key);
-        if (e) { e.count++; if (!e.chatIds.includes(chatId)) e.chatIds.push(chatId); }
-        else into.set(key, { name, count: 1, chatIds: [chatId], kind });
-      }
-    };
-    add(doc.people().out("array"), "person");
-    add(doc.organizations().out("array"), "org");
-    add(doc.places().out("array"), "place");
-  } catch {
-    tallyEntities(text, chatId, into);
-  }
+interface EntityAgg {
+  key: string;
+  /** display form → frequency, to pick the most common surface as the label. */
+  displays: Map<string, number>;
+  count: number;
+  chatIds: Set<string>;
+  kinds: Map<EntityKind, number>;
 }
 
-/** Heuristic named-entity / people extraction from raw text. */
-function tallyEntities(text: string, chatId: string, into: Map<string, Entity>) {
-  let m: RegExpExecArray | null;
-  ENTITY_RE.lastIndex = 0;
-  while ((m = ENTITY_RE.exec(text))) {
-    const name = m[1].replace(/\s+/g, " ").replace(/[.'’-]+$/, "").trim();
-    const words = name.split(" ");
-    // Keep multi-word phrases, or single proper nouns that aren't sentence-start noise.
-    const lc = words[0]!.toLowerCase();
-    if (words.length < 2 && (STOPWORDS.has(lc) || name.length < 3)) continue;
-    if (words.length >= 2 && words.every((w) => STOPWORDS.has(w.toLowerCase()))) continue;
-    const key = name.toLowerCase();
-    const e = into.get(key);
-    if (e) { e.count++; if (!e.chatIds.includes(chatId)) e.chatIds.push(chatId); }
-    else into.set(key, { name, count: 1, chatIds: [chatId] });
+/** High-quality typed NER via compromise — people, organizations, places — over
+ *  PROSE only (code + URLs already stripped). Aggregates by canonical key so
+ *  possessive/whitespace/plural variants merge into one counted entity. This is
+ *  the single extraction path used for both per-chat and whole-archive views. */
+function tallyEntitiesNLP(prose: string, chatId: string, into: Map<string, EntityAgg>) {
+  let doc: ReturnType<typeof nlp>;
+  try { doc = nlp(prose.slice(0, 200_000)); } catch { return; }
+  const add = (names: string[], kind: EntityKind) => {
+    for (const raw of names) {
+      const display = entityDisplay(raw);
+      if (isJunkEntity(display)) continue;
+      const key = entityKey(raw);
+      if (!key) continue;
+      let e = into.get(key);
+      if (!e) { e = { key, displays: new Map(), count: 0, chatIds: new Set(), kinds: new Map() }; into.set(key, e); }
+      e.count++;
+      e.chatIds.add(chatId);
+      e.displays.set(display, (e.displays.get(display) || 0) + 1);
+      e.kinds.set(kind, (e.kinds.get(kind) || 0) + 1);
+    }
+  };
+  try { add(doc.people().out("array"), "person"); } catch { /* ignore */ }
+  try { add(doc.organizations().out("array"), "org"); } catch { /* ignore */ }
+  try { add(doc.places().out("array"), "place"); } catch { /* ignore */ }
+}
+
+/** Finalize aggregates → sorted Entity[] with a display label + winning kind. */
+function aggToEntities(map: Map<string, EntityAgg>): Entity[] {
+  const out: Entity[] = [];
+  for (const e of map.values()) {
+    let name = ""; let best = -1;
+    for (const [d, n] of e.displays) if (n > best) { best = n; name = d; }
+    let kind: EntityKind = "name"; let bk = -1;
+    for (const [k, n] of e.kinds) if (n > bk) { bk = n; kind = k; }
+    out.push({ name, count: e.count, chatIds: [...e.chatIds], kind });
+  }
+  return out.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+/** Merge one chat's finalized entities into a cross-chat aggregate (archive). */
+function mergeEntities(entities: Entity[], into: Map<string, EntityAgg>) {
+  for (const e of entities) {
+    const key = entityKey(e.name);
+    if (!key) continue;
+    let agg = into.get(key);
+    if (!agg) { agg = { key, displays: new Map(), count: 0, chatIds: new Set(), kinds: new Map() }; into.set(key, agg); }
+    agg.count += e.count;
+    for (const id of e.chatIds) agg.chatIds.add(id);
+    agg.displays.set(e.name, (agg.displays.get(e.name) || 0) + e.count);
+    if (e.kind) agg.kinds.set(e.kind, (agg.kinds.get(e.kind) || 0) + e.count);
   }
 }
 
@@ -299,28 +385,40 @@ function uniqueEmails(text: string): string[] {
 // Public: per-chat
 // ---------------------------------------------------------------------------
 
-export function chatInsights(chat: Chat): ChatInsights {
+// Content-hashed cache: per-chat insight extraction (the NER/RAKE work) is done
+// once and reused until the chat's content changes. archiveInsights merges these
+// cached results, so it no longer reprocesses every turn on every storage change.
+const chatInsightsCache = new Map<string, { hash: string; value: ChatInsights }>();
+
+/** Hash of a chat's searchable content — invalidates the cache when text moves. */
+function chatContentHash(chat: Chat): string {
+  let s = `${chat.id}|${chat.turns.length}`;
+  for (const t of chat.turns) s += `${t.question || ""}${t.answerText || ""}`;
+  return hashText(s);
+}
+
+function computeChatInsights(chat: Chat): ChatInsights {
   const links: LinkItem[] = [];
   const code: CodeBlock[] = [];
-  const entityMap = new Map<string, Entity>();
-  let fullText = "";
+  const entityMap = new Map<string, EntityAgg>();
+  let proseAll = "";
   let longestAnswerWords = 0;
   let words = 0;
 
   for (const t of chat.turns) {
     links.push(...extractTurnLinks(t, chat));
     code.push(...extractTurnCode(t, chat));
-    const text = turnText(t);
-    fullText += text + "\n";
-    tallyEntitiesNLP(text, chat.id, entityMap);
+    const prose = proseTurnText(t);
+    proseAll += prose + "\n";
+    tallyEntitiesNLP(prose, chat.id, entityMap);
     const aw = wordCount(t.answerText || htmlToText(t.answerHtml));
     if (aw > longestAnswerWords) longestAnswerWords = aw;
-    words += wordCount(text);
+    words += wordCount(turnText(t));
   }
 
-  const entities = [...entityMap.values()].sort((a, b) => b.count - a.count);
-  const topics = rakeTopics(fullText);
-  const emails = uniqueEmails(fullText);
+  const entities = aggToEntities(entityMap);
+  const topics = rakeTopics(proseAll);
+  const emails = uniqueEmails(proseAll);
 
   const stats: ChatStats = {
     turns: chat.turns.length,
@@ -334,37 +432,42 @@ export function chatInsights(chat: Chat): ChatInsights {
   return { links: groupLinks(links), entities, topics, emails, code, stats };
 }
 
+export function chatInsights(chat: Chat): ChatInsights {
+  const hash = chatContentHash(chat);
+  const cached = chatInsightsCache.get(chat.id);
+  if (cached && cached.hash === hash) return cached.value;
+  const value = computeChatInsights(chat);
+  chatInsightsCache.set(chat.id, { hash, value });
+  return value;
+}
+
 // ---------------------------------------------------------------------------
 // Public: whole archive (global browse). Derived reactively from all chats.
 // ---------------------------------------------------------------------------
 
 export function archiveInsights(chats: Chat[]): ArchiveInsights {
   const allLinks: LinkItem[] = [];
-  const entityMap = new Map<string, Entity>();
+  const entityMap = new Map<string, EntityAgg>();
   const topicWeight = new Map<string, number>();
   const emailCount = new Map<string, number>();
   let totalTurns = 0;
   let totalWords = 0;
 
+  // Reuse the (cached) per-chat extraction and merge — the same compromise-typed
+  // entities the reader sees, so the two views never disagree, and only chats
+  // whose content actually changed are recomputed.
   for (const chat of chats) {
-    let fullText = "";
-    for (const t of chat.turns) {
-      allLinks.push(...extractTurnLinks(t, chat));
-      const text = turnText(t);
-      fullText += text + "\n";
-      tallyEntities(text, chat.id, entityMap);
-      totalWords += wordCount(text);
-    }
-    totalTurns += chat.turns.length;
-    for (const tp of rakeTopics(fullText, 20)) {
-      topicWeight.set(tp.term, (topicWeight.get(tp.term) || 0) + tp.weight);
-    }
-    for (const e of uniqueEmails(fullText)) emailCount.set(e, (emailCount.get(e) || 0) + 1);
+    const ci = chatInsights(chat);
+    for (const g of ci.links) for (const l of g.items) allLinks.push(l);
+    mergeEntities(ci.entities, entityMap);
+    for (const tp of ci.topics) topicWeight.set(tp.term, (topicWeight.get(tp.term) || 0) + tp.weight);
+    for (const e of ci.emails) emailCount.set(e, (emailCount.get(e) || 0) + 1);
+    totalTurns += ci.stats.turns;
+    totalWords += ci.stats.words;
   }
 
-  const entities = [...entityMap.values()]
+  const entities = aggToEntities(entityMap)
     .filter((e) => e.count > 1 || e.chatIds.length > 1)
-    .sort((a, b) => b.count - a.count)
     .slice(0, 200);
   const topics = [...topicWeight.entries()]
     .map(([term, weight]) => ({ term, weight }))
