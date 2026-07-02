@@ -8,7 +8,7 @@ export default defineConfig({
     name: "Gemini Chat Exporter + Archive",
     description:
       "Capture your Google Gemini conversations into a private, searchable archive — Gemini-style UI, keyword/fuzzy/on-device semantic search, EPUB/JSON/Markdown export.",
-    version: "1.1.0",
+    version: "1.2.0",
     // "tabs" is needed to find/create tabs (web app sync + open-in-archive);
     // "contextMenus" powers the right-click capture; "unlimitedStorage" keeps a
     // large archive from hitting the default storage.local quota.
