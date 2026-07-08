@@ -9,6 +9,43 @@ import type { Chat, ChatTurn } from "./types";
 
 export const CHATS_KEY = "collected_chats";
 
+// ---------------------------------------------------------------------------
+// Cross-method content signature
+//
+// The same turn can be captured three different ways — the RPC loader (answer as
+// Markdown, key `r:<responseId>`), the DOM scraper (answer as innerText, a
+// content-hash or DOM-id key), and the live recorder (also DOM). Their KEYS
+// differ, so a naive key-only merge would store the same turn twice. To dedupe
+// across methods we also compute a normalized content signature: lowercase the
+// question + answer, strip everything but alphanumerics, and hash. Markdown and
+// innerText of the same answer collapse to (near-)identical alphanumeric streams,
+// so their signatures match and the turn is reconciled instead of duplicated.
+// ---------------------------------------------------------------------------
+
+function fnv1a(str: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+function normContent(s: string): string {
+  return (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+/** Content signature, or "" when the turn is too short to signature safely
+ *  (short strings like "ok" collide across genuinely different turns). */
+export function turnContentSig(question: string, answerText: string): string {
+  const q = normContent(question);
+  const a = normContent(answerText);
+  const combined = q + "␟" + a.slice(0, 400);
+  // Require enough signal that a coincidental collision is implausible.
+  if (q.length + a.length < 12) return "";
+  return fnv1a(combined);
+}
+
 export async function getChats(): Promise<Chat[]> {
   const res = await browser.storage.local.get(CHATS_KEY);
   return (res[CHATS_KEY] as Chat[]) ?? [];
@@ -28,35 +65,49 @@ export async function setChats(chats: Chat[]): Promise<void> {
 export function mergeTurns(existing: ChatTurn[], incoming: ChatTurn[]): ChatTurn[] {
   const byKey = new Map<string, ChatTurn>();
   const byIndex = new Map<number, ChatTurn>();
+  const bySig = new Map<string, ChatTurn>();
   for (const t of existing) {
     if (t.key) byKey.set(t.key, t);
     byIndex.set(t.index, t);
+    const sig = turnContentSig(t.question, t.answerText);
+    if (sig && !bySig.has(sig)) bySig.set(sig, t);
   }
 
   const result: ChatTurn[] = [];
-  const usedIndexes = new Set<number>();
+  const used = new Set<ChatTurn>(); // existing turns already consumed
 
   for (const t of incoming) {
     let prev: ChatTurn | undefined;
+
+    // 1) Exact key match (same capture method, or a re-scrape).
     if (t.key && byKey.has(t.key)) {
       prev = byKey.get(t.key);
-      if (prev) usedIndexes.add(prev.index);
-    } else if (!t.key && byIndex.has(t.index) && !usedIndexes.has(t.index)) {
-      // Index fallback is ONLY for legacy keyless data. When the incoming turn
-      // carries a key but doesn't match any existing key, it is a *new* turn —
-      // never let it overwrite a differently-keyed turn that happens to share an
-      // index (that would silently drop a captured turn).
-      const cand = byIndex.get(t.index);
-      if (cand && !cand.key) {
-        prev = cand;
-        usedIndexes.add(t.index);
+    }
+
+    // 2) Content-signature match — reconciles copies captured by a *different*
+    //    method (RPC Markdown vs DOM innerText) whose keys don't match.
+    if (!prev) {
+      const sig = turnContentSig(t.question, t.answerText);
+      if (sig) {
+        const cand = bySig.get(sig);
+        if (cand && !used.has(cand)) prev = cand;
       }
     }
 
+    // 3) Index fallback — ONLY for legacy keyless data. A keyed incoming turn
+    //    that matched nothing above is genuinely new; never let it overwrite a
+    //    differently-keyed turn that merely shares an index.
+    if (!prev && !t.key) {
+      const cand = byIndex.get(t.index);
+      if (cand && !cand.key && !used.has(cand)) prev = cand;
+    }
+
     if (prev) {
+      used.add(prev);
       const richer = (t.answerText?.length || 0) >= (prev.answerText?.length || 0);
       result.push({
         index: t.index,
+        // Prefer a stable key from either side so future merges stay anchored.
         key: t.key ?? prev.key,
         question: t.question || prev.question,
         answerText: richer ? t.answerText : prev.answerText,
@@ -69,7 +120,7 @@ export function mergeTurns(existing: ChatTurn[], incoming: ChatTurn[]): ChatTurn
 
   // Keep existing turns the incoming scrape didn't cover.
   for (const t of existing) {
-    if (!usedIndexes.has(t.index)) result.push({ ...t });
+    if (!used.has(t)) result.push({ ...t });
   }
 
   return result.sort((a, b) => a.index - b.index).map((t, i) => ({ ...t, index: i }));

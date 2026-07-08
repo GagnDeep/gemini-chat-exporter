@@ -16,6 +16,19 @@ export interface Settings {
   webappOrigin: string;
   /** Automatically (re)build the on-device vector index after a capture. */
   autoBuildIndex: boolean;
+  /**
+   * Capture full history via Gemini's own history RPC (fast — one/few authenticated
+   * fetches, no scrolling) instead of auto-scrolling the virtualized list. Falls
+   * back to the scroll scraper automatically if the RPC is unavailable.
+   */
+  useRpcLoader: boolean;
+  /** Turns fetched per RPC page. Larger = fewer round-trips (the app default is 10). */
+  historyPageSize: number;
+  /**
+   * Live-mirror: as you chat on any Gemini page, newly-completed turns are saved
+   * into the archive automatically (new messages only — no back-scraping).
+   */
+  autoMirror: boolean;
 }
 
 /** Deployed companion web app. Used by default in the built extension. */
@@ -31,6 +44,9 @@ export const DEFAULT_SETTINGS: Settings = {
   mergeMode: "merge",
   webappOrigin: WEBAPP_ORIGIN,
   autoBuildIndex: false,
+  useRpcLoader: true,
+  historyPageSize: 50,
+  autoMirror: true,
 };
 
 const SETTINGS_KEY = "settings";

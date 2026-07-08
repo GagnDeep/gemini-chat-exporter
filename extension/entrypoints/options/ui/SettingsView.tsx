@@ -61,6 +61,9 @@ export function SettingsView() {
       mergeMode: form.mergeMode === "replace" ? "replace" : "merge",
       webappOrigin: normalizeOrigin(form.webappOrigin),
       autoBuildIndex: form.autoBuildIndex,
+      useRpcLoader: form.useRpcLoader,
+      historyPageSize: clamp(Number(form.historyPageSize), 5, 200, 50),
+      autoMirror: form.autoMirror,
     });
     setStatus({ msg: "Settings saved.", kind: "ok" });
     showToast("Settings saved.", "ok");
@@ -248,12 +251,36 @@ export function SettingsView() {
         </div>
 
         <div className="card">
-          <h2>Full-conversation capture</h2>
+          <h2>Fast capture &amp; live mirror</h2>
+          <label className="row-check">
+            <input type="checkbox" checked={form.useRpcLoader} onChange={(e) => setForm({ ...form, useRpcLoader: e.target.checked })} />
+            <span>
+              <strong>Fast history loader (recommended)</strong>
+              <em>Fetches the whole conversation through Gemini's own history API — no scrolling, far faster. Automatically falls back to scrolling if unavailable.</em>
+            </span>
+          </label>
+          <div className="field">
+            <label>Turns per fetch</label>
+            <input type="number" min={5} max={200} step={5} value={form.historyPageSize}
+              onChange={(e) => setForm({ ...form, historyPageSize: Number(e.target.value) })} />
+            <em>Higher pulls more per request (fewer round-trips). 50 is a good default.</em>
+          </div>
+          <label className="row-check">
+            <input type="checkbox" checked={form.autoMirror} onChange={(e) => setForm({ ...form, autoMirror: e.target.checked })} />
+            <span>
+              <strong>Live-mirror new messages</strong>
+              <em>As you chat on any Gemini page, newly-finished turns are saved to your archive automatically (new messages only — no back-scraping).</em>
+            </span>
+          </label>
+        </div>
+
+        <div className="card">
+          <h2>Full-conversation capture (scroll fallback)</h2>
           <label className="row-check">
             <input type="checkbox" checked={form.autoScroll} onChange={(e) => setForm({ ...form, autoScroll: e.target.checked })} />
             <span>
               <strong>Auto-scroll to capture the whole chat</strong>
-              <em>Scrolls a long conversation so virtualized turns are all collected.</em>
+              <em>Scrolls a long conversation so virtualized turns are all collected. Used when the fast loader is off or unavailable.</em>
             </span>
           </label>
           <div className="field">

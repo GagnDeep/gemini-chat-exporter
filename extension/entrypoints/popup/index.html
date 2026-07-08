@@ -16,6 +16,22 @@
     </header>
 
     <main>
+      <section id="composer" class="composer">
+        <div class="composer-head">
+          <h2>Send a message</h2>
+          <label class="composer-target">
+            <select id="compose-target">
+              <option value="current">Continue current chat</option>
+              <option value="new">Start a new chat</option>
+            </select>
+          </label>
+        </div>
+        <textarea id="compose-text" rows="2" placeholder="Message Gemini… (Enter to send, Shift+Enter for newline)"></textarea>
+        <button id="compose-send" class="primary">
+          <span>Send to Gemini</span>
+        </button>
+      </section>
+
       <button id="open-archive-chat" class="primary">Open this chat in Archive</button>
 
       <div class="row2">

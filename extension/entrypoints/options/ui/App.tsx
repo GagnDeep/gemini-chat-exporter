@@ -3,6 +3,7 @@ import { SearchView } from "./SearchView";
 import { ChatView } from "./ChatView";
 import { SettingsView } from "./SettingsView";
 import { BrowseView } from "./BrowseView";
+import { ComposeView } from "./ComposeView";
 import { ChatNav } from "./ChatNav";
 import { CommandPalette } from "./CommandPalette";
 import { HelpOverlay } from "./HelpOverlay";
@@ -13,6 +14,7 @@ import * as I from "./icons";
 type Route =
   | { view: "search" }
   | { view: "browse" }
+  | { view: "compose" }
   | { view: "chat"; chatId: string; turn?: number; query?: string; mode?: string; terms?: string[] }
   | { view: "settings" };
 
@@ -42,6 +44,7 @@ function parseHash(): Route {
   }
   if (h.startsWith("settings")) return { view: "settings" };
   if (h.startsWith("browse")) return { view: "browse" };
+  if (h.startsWith("compose")) return { view: "compose" };
   return { view: "search" };
 }
 
@@ -180,6 +183,10 @@ export function App() {
           aria-pressed={navOpen} onClick={() => setNavOpen((o) => !o)}>
           <I.PanelLeft />
         </button>
+        <button className={"rail-btn" + (route.view === "compose" ? " active" : "")} title="Chat — send a message to Gemini"
+          onClick={() => navigate("#/compose")}>
+          <I.Msg />
+        </button>
         <button className={"rail-btn" + (route.view === "search" ? " active" : "")} title="Search (/)"
           onClick={() => navigate("#/search")}>
           <I.Search />
@@ -212,6 +219,7 @@ export function App() {
       <main className="main" key={route.view + ("chatId" in route ? route.chatId : "")}>
         {route.view === "search" && <SearchView />}
         {route.view === "browse" && <BrowseView />}
+        {route.view === "compose" && <ComposeView />}
         {route.view === "chat" && <ChatView chatId={route.chatId} turn={route.turn} query={route.query} mode={route.mode} terms={route.terms} />}
         {route.view === "settings" && <SettingsView />}
       </main>

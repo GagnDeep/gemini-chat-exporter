@@ -312,6 +312,58 @@ clearBtn.addEventListener("click", async () => {
   setStatus("Collection cleared.");
 });
 
+// --- composer: send a new message into Gemini ------------------------------
+
+const composeText = $<HTMLTextAreaElement>("compose-text");
+const composeSend = $<HTMLButtonElement>("compose-send");
+const composeTarget = $<HTMLSelectElement>("compose-target");
+
+async function sendComposed(): Promise<void> {
+  const text = composeText.value.trim();
+  if (!text) { composeText.focus(); return; }
+  composeSend.disabled = true;
+  setStatus("Sending to Gemini…");
+  try {
+    // "current" continues the active chat when we're on one (or the most recent
+    // Gemini tab); "new" always opens a fresh conversation.
+    const wantNew = composeTarget.value === "new";
+    const tab = await activeGeminiTab();
+    let convId: string | undefined;
+    let url: string | undefined = "https://gemini.google.com/app";
+    if (!wantNew && tab) {
+      try {
+        const resp = (await browser.tabs.sendMessage(tab.id, { type: "GET_META" })) as
+          | { ok: true; meta: { id: string; url: string } } | { ok: false } | undefined;
+        if (resp && "ok" in resp && resp.ok) { convId = resp.meta.id; url = resp.meta.url; }
+      } catch { /* content script not ready; fall back to a new chat */ }
+    }
+    const res = (await browser.runtime.sendMessage({
+      type: "SEND_TO_GEMINI",
+      text,
+      convId: wantNew ? undefined : convId,
+      url: wantNew ? "https://gemini.google.com/app" : url,
+    })) as { ok: boolean; error?: string } | undefined;
+    if (res?.ok) {
+      composeText.value = "";
+      setStatus("Sent. Gemini is answering — it'll be mirrored into your archive.", "ok");
+    } else {
+      setStatus(res?.error || "Couldn't send the message.", "err");
+    }
+  } catch (e) {
+    setStatus(e instanceof Error ? e.message : "Couldn't send the message.", "err");
+  } finally {
+    composeSend.disabled = false;
+  }
+}
+
+composeSend.addEventListener("click", () => void sendComposed());
+composeText.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    void sendComposed();
+  }
+});
+
 $<HTMLButtonElement>("open-archive").addEventListener("click", () => void openArchive("#/search"));
 $<HTMLButtonElement>("open-options").addEventListener("click", () => void openArchive("#/settings"));
 $<HTMLButtonElement>("open-webapp").addEventListener("click", async () => {

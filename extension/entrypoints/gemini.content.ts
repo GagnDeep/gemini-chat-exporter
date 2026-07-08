@@ -26,6 +26,38 @@ import type { Chat, ScrapeJob } from "@/lib/types";
 import { commitChat } from "@/lib/chats-store";
 import { startJob, updateJob, finishJob } from "@/lib/jobs";
 import { submitPrompt } from "@/lib/compose";
+import { scrapeFullChatViaRpc, canUseRpc } from "@/lib/gemini-rpc";
+import { getSettings } from "@/lib/settings";
+import { startLiveRecorder } from "@/lib/live-recorder";
+
+/**
+ * Run a full-history capture using the fast RPC path when enabled + available,
+ * falling back to the auto-scroll scraper otherwise (or if the RPC throws). The
+ * two loaders are normalized to the same onProgress/onSnapshot contract so the
+ * job machinery doesn't care which one ran.
+ */
+async function runFullCapture(
+  opts: ScrapeOptions | undefined,
+  onProgress: (info: { turns: number; iteration: number; atTop: boolean; loading: boolean }) => void,
+  onSnapshot: (chat: Chat) => void,
+): Promise<Chat> {
+  const settings = await getSettings();
+
+  if (settings.useRpcLoader && canUseRpc()) {
+    try {
+      return await scrapeFullChatViaRpc({
+        pageSize: settings.historyPageSize,
+        onProgress: (i) => onProgress({ turns: i.turns, iteration: i.page, atTop: i.done, loading: !i.done }),
+        onSnapshot,
+      });
+    } catch {
+      // RPC shape changed / tokens missing — fall through to the scroll scraper
+      // so a capture still succeeds.
+    }
+  }
+
+  return scrapeFullChat({ ...opts, onProgress, onSnapshot });
+}
 
 function preflightError(): string | null {
   if (!hasConversation()) {
@@ -100,11 +132,7 @@ async function beginJob(
   // Detached: keep capturing + persisting regardless of who is listening.
   (async () => {
     try {
-      const chat = await scrapeFullChat({
-        ...opts,
-        onProgress: writeProgress,
-        onSnapshot: commitSnapshot,
-      });
+      const chat = await runFullCapture(opts, writeProgress, commitSnapshot);
       const stored = await commitChat(chat, "merge");
       await finishJob(jobId, "done", {
         chatId: stored.id,
@@ -126,6 +154,10 @@ async function beginJob(
 export default defineContentScript({
   matches: ["https://gemini.google.com/*"],
   main() {
+    // Start live-mirroring new turns into the archive as the user chats. Gated
+    // internally by the `autoMirror` setting; entirely read-only + best-effort.
+    startLiveRecorder();
+
     // If the user navigates away mid-capture, flag the job as interrupted so the
     // UI doesn't show a phantom spinner. (Best-effort: storage writes from an
     // unloading page can be dropped; the stall reconciler is the backstop.)
