@@ -26,7 +26,7 @@ import type { Chat, ScrapeJob } from "@/lib/types";
 import { commitChat } from "@/lib/chats-store";
 import { startJob, updateJob, finishJob } from "@/lib/jobs";
 import { submitPrompt } from "@/lib/compose";
-import { scrapeFullChatViaRpc, canUseRpc } from "@/lib/gemini-rpc";
+import { scrapeFullChatViaRpc } from "@/lib/gemini-rpc";
 import { getSettings } from "@/lib/settings";
 import { startLiveRecorder } from "@/lib/live-recorder";
 
@@ -43,16 +43,18 @@ async function runFullCapture(
 ): Promise<Chat> {
   const settings = await getSettings();
 
-  if (settings.useRpcLoader && canUseRpc()) {
+  if (settings.useRpcLoader) {
     try {
+      // scrapeFullChatViaRpc pings the main-world bridge first and throws if the
+      // RPC path isn't usable, so this cleanly falls through to scrolling.
       return await scrapeFullChatViaRpc({
         pageSize: settings.historyPageSize,
         onProgress: (i) => onProgress({ turns: i.turns, iteration: i.page, atTop: i.done, loading: !i.done }),
         onSnapshot,
       });
     } catch {
-      // RPC shape changed / tokens missing — fall through to the scroll scraper
-      // so a capture still succeeds.
+      // RPC unavailable / shape changed — fall through to the scroll scraper so a
+      // capture still succeeds.
     }
   }
 

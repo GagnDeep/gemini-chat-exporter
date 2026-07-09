@@ -38,35 +38,57 @@ import { mdToHtml } from "./md-to-html";
  *  future rename is a one-line change. */
 export const HISTORY_RPC = "hNvQHb";
 
-const BATCHEXECUTE_PATH = "_/BardChatUi/data/batchexecute";
+// ---------------------------------------------------------------------------
+// Main-world bridge transport
+//
+// The tokens + authenticated fetch live in the MAIN-world bridge
+// (entrypoints/gemini-world.content.ts) because this module runs in the ISOLATED
+// content-script world, which cannot see `window.WIZ_global_data`. We reach the
+// bridge over window.postMessage and it returns the raw batchexecute response
+// text, which we parse here.
+// ---------------------------------------------------------------------------
 
-export interface PageTokens {
-  at: string; // SNlM0e — XSRF/session token
-  sid: string; // FdrFJe — f.sid
-  bl: string; // cfb2h — backend version label
-  hl: string; // UI language
-  prefix: string; // "/u/<n>/" authuser path prefix (or "/")
+const BRIDGE_REQ = "GCE_RPC_REQ";
+const BRIDGE_RES = "GCE_RPC_RES";
+
+let bridgeSeq = 0;
+
+interface BridgeReply {
+  ok: boolean;
+  status?: number;
+  text?: string;
+  error?: string;
 }
 
-/** Read the tokens the batchexecute endpoint needs from the live Gemini page. */
-export function getPageTokens(): PageTokens | null {
-  const w = (globalThis as unknown as { WIZ_global_data?: Record<string, unknown> }).WIZ_global_data;
-  const at = w && typeof w.SNlM0e === "string" ? (w.SNlM0e as string) : "";
-  if (!at) return null; // without the XSRF token the request can't be authorized
-  const sid = w && typeof w.FdrFJe === "string" ? (w.FdrFJe as string) : "";
-  const bl = w && typeof w.cfb2h === "string" ? (w.cfb2h as string) : "";
-  const hl =
-    (w && typeof w.qwAQke === "string" && (w.qwAQke as string)) ||
-    (typeof document !== "undefined" && document.documentElement.getAttribute("lang")) ||
-    "en";
-  const m = typeof location !== "undefined" ? location.pathname.match(/^\/u\/\d+\//) : null;
-  const prefix = m ? m[0] : "/";
-  return { at, sid, bl, hl, prefix };
+/** Post a message to the main-world bridge and await its matching reply. */
+function bridgeCall(
+  message: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<BridgeReply> {
+  return new Promise((resolve) => {
+    const id = `gce-${++bridgeSeq}-${Date.now()}`;
+    const onMsg = (e: MessageEvent) => {
+      if (e.source !== window) return;
+      const d = e.data as (BridgeReply & { source?: string; id?: string }) | undefined;
+      if (!d || d.source !== BRIDGE_RES || d.id !== id) return;
+      window.removeEventListener("message", onMsg);
+      clearTimeout(timer);
+      resolve(d);
+    };
+    const timer = setTimeout(() => {
+      window.removeEventListener("message", onMsg);
+      resolve({ ok: false, error: "bridge-timeout" });
+    }, timeoutMs);
+    window.addEventListener("message", onMsg);
+    window.postMessage({ source: BRIDGE_REQ, id, ...message }, location.origin);
+  });
 }
 
-/** True when the current page exposes what we need to use the RPC path. */
-export function canUseRpc(): boolean {
-  return getPageTokens() !== null;
+/** True when the main-world bridge is present AND the page exposes session
+ *  tokens — i.e. the fast RPC path is usable right now. */
+export async function canUseRpc(): Promise<boolean> {
+  const res = await bridgeCall({ ping: true }, 2000);
+  return res.ok === true;
 }
 
 /** "c_<id>" form of the conversation id the RPC expects, from the page URL. */
@@ -81,8 +103,6 @@ export function conversationRpcId(url = location.href): string {
   const id = last.split("?")[0];
   return id.startsWith("c_") ? id : "c_" + id;
 }
-
-let reqCounter = Math.floor(Math.random() * 90000) + 10000;
 
 /**
  * Robustly extract the first complete top-level JSON array from a batchexecute
@@ -118,36 +138,15 @@ function extractFirstArray(raw: string): unknown[] {
   return JSON.parse(afterPrefix.slice(start, end)) as unknown[];
 }
 
-/** Low-level: call a single batchexecute RPC and return its parsed inner value. */
-export async function callRpc(
-  rpcid: string,
-  arg: unknown,
-  tokens: PageTokens,
-): Promise<unknown> {
-  const reqid = (reqCounter += 100000);
-  const params = new URLSearchParams({
-    rpcids: rpcid,
-    "source-path": "/app",
-    "f.sid": tokens.sid,
-    bl: tokens.bl,
-    hl: tokens.hl,
-    _reqid: String(reqid),
-    rt: "c",
-  });
-  const url = `${tokens.prefix}${BATCHEXECUTE_PATH}?${params.toString()}`;
-  const freq = [[[rpcid, JSON.stringify(arg), null, "generic"]]];
-  const body =
-    "f.req=" + encodeURIComponent(JSON.stringify(freq)) + "&at=" + encodeURIComponent(tokens.at) + "&";
-
-  const res = await fetch(url, {
-    method: "POST",
-    credentials: "include",
-    headers: { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" },
-    body,
-  });
-  if (!res.ok) throw new Error(`Gemini RPC ${rpcid} failed (HTTP ${res.status}).`);
-  const raw = await res.text();
-  const rows = extractFirstArray(raw);
+/** Low-level: call a single batchexecute RPC (via the main-world bridge) and
+ *  return its parsed inner value. Throws when the bridge is unavailable or the
+ *  request fails, so callers can fall back to the scroll scraper. */
+export async function callRpc(rpcid: string, arg: unknown, timeoutMs = 25_000): Promise<unknown> {
+  const res = await bridgeCall({ rpcid, arg }, timeoutMs);
+  if (!res.ok || typeof res.text !== "string") {
+    throw new Error(`Gemini RPC ${rpcid} failed (${res.error || "HTTP " + res.status}).`);
+  }
+  const rows = extractFirstArray(res.text);
   const row = (rows as unknown[][]).find(
     (r) => Array.isArray(r) && r[0] === "wrb.fr" && r[1] === rpcid,
   ) as unknown[] | undefined;
@@ -287,8 +286,9 @@ function buildChatFromRaw(raw: RawTurn[], convUrl: string): Chat {
  */
 export async function scrapeFullChatViaRpc(opts: RpcScrapeOptions = {}): Promise<Chat> {
   const cfg = { ...RPC_DEFAULTS, ...opts };
-  const tokens = getPageTokens();
-  if (!tokens) throw new Error("Gemini session tokens not found on the page.");
+  if (!(await canUseRpc())) {
+    throw new Error("Gemini history RPC unavailable (bridge or session tokens missing).");
+  }
 
   const convId = conversationRpcId();
   const convUrl = location.href;
@@ -301,7 +301,7 @@ export async function scrapeFullChatViaRpc(opts: RpcScrapeOptions = {}): Promise
 
   do {
     const arg = [convId, cfg.pageSize, cursor, 1, [1], [4], null, 1];
-    const inner = (await callRpc(HISTORY_RPC, arg, tokens)) as unknown[] | null;
+    const inner = (await callRpc(HISTORY_RPC, arg)) as unknown[] | null;
     page++;
 
     const rawTurns = Array.isArray(inner?.[0]) ? (inner![0] as unknown[]) : [];
