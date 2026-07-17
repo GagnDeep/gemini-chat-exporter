@@ -1,18 +1,23 @@
-// Popup controller. Captures the active Gemini tab as a *persisted* background
-// job (so closing the popup never loses progress), opens the Gemini-style
-// archive page (optionally deep-linked to the current chat), shows live job
-// status from storage, and manages exports + web-app sync.
+// Popup controller.
+//
+// Detects which supported service the active tab is on (Gemini / Claude /
+// ChatGPT), adapts the primary action + composer to it, captures the open chat
+// as a *persisted* background job (so closing the popup never loses progress),
+// opens the archive page, shows live job status from storage, and manages
+// exports + web-app sync. All site-specific behaviour comes from the provider
+// profiles in lib/providers.ts.
 
 import type { Chat, ScrapeJob } from "@/lib/types";
 import { exportEpub, exportMarkdown, exportJson } from "@/lib/exporters";
 import { getSettings } from "@/lib/settings";
 import { getChats, setChats } from "@/lib/chats-store";
 import { getJobs, reconcileStalled } from "@/lib/jobs";
+import { providerForUrl, providerById, sourceLabel, sourceAccent, type Provider, type ProviderId } from "@/lib/providers";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const openArchiveChatBtn = $<HTMLButtonElement>("open-archive-chat");
-const scrapeBtn = $<HTMLButtonElement>("scrape");
-const scrapeFullBtn = $<HTMLButtonElement>("scrape-full");
+const primaryBtn = $<HTMLButtonElement>("primary");
+const scrapeVisibleBtn = $<HTMLButtonElement>("scrape-visible");
+const primaryHint = $<HTMLSpanElement>("primary-hint");
 const statusEl = $<HTMLParagraphElement>("status");
 const jobEl = $<HTMLDivElement>("job");
 const listEl = $<HTMLUListElement>("list");
@@ -20,6 +25,9 @@ const countEl = $<HTMLSpanElement>("count");
 const emptyEl = $<HTMLParagraphElement>("empty");
 const bulkActions = $<HTMLDivElement>("bulk-actions");
 const clearBtn = $<HTMLButtonElement>("clear");
+const ctxEl = $<HTMLElement>("context");
+const ctxTitle = $<HTMLDivElement>("ctx-title");
+const ctxSub = $<HTMLDivElement>("ctx-sub");
 
 function setStatus(msg: string, kind: "" | "ok" | "err" = "") {
   statusEl.textContent = msg;
@@ -51,6 +59,113 @@ async function openArchive(hash = ""): Promise<void> {
   }
 }
 
+// --- active-tab context ----------------------------------------------------
+
+interface ActiveCtx {
+  tabId: number;
+  url: string;
+  provider: Provider;
+}
+
+let active: ActiveCtx | null = null;
+let activeChatId: string | undefined;
+let activeChatUrl: string | undefined;
+let preCount = 0;
+
+async function activeTab(): Promise<{ id: number; url: string } | null> {
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !tab.url) return null;
+  return { id: tab.id, url: tab.url };
+}
+
+function setSiteAccent(color: string) {
+  document.documentElement.style.setProperty("--site", color);
+}
+
+const composerWrap = $<HTMLDetailsElement>("composer");
+const composeProvider = $<HTMLSelectElement>("compose-provider");
+const composeTarget = $<HTMLSelectElement>("compose-target");
+const composeProviderLabel = composeProvider.closest("label") as HTMLLabelElement;
+const composerTargetLabel = $<HTMLSpanElement>("composer-target-label");
+
+async function refreshActiveContext(): Promise<void> {
+  const tab = await activeTab();
+  const provider = tab ? providerForUrl(tab.url) : null;
+
+  if (!tab || !provider) {
+    active = null;
+    activeChatId = undefined;
+    activeChatUrl = undefined;
+    setSiteAccent("#9aa0a6");
+    ctxEl.style.setProperty("--site", "#9aa0a6");
+    ctxTitle.textContent = "Not on a supported chat";
+    ctxSub.style.whiteSpace = "normal";
+    ctxSub.innerHTML =
+      '<span class="site-chips">' +
+      '<button class="site-chip" data-site="https://gemini.google.com/app">Gemini</button>' +
+      '<button class="site-chip" data-site="https://claude.ai/new">Claude</button>' +
+      '<button class="site-chip" data-site="https://chatgpt.com/">ChatGPT</button>' +
+      "</span>";
+    ctxSub.querySelectorAll<HTMLButtonElement>(".site-chip").forEach((b) =>
+      b.addEventListener("click", () => void browser.tabs.create({ url: b.dataset.site!, active: true })),
+    );
+    primaryBtn.textContent = "Open Archive";
+    scrapeVisibleBtn.style.display = "none";
+    primaryHint.textContent = "Browse everything you've saved";
+    // Composer: pick a target service manually, always a new chat.
+    composeProviderLabel.style.display = "";
+    composeTarget.value = "new";
+    updateComposerLabel();
+    return;
+  }
+
+  active = { tabId: tab.id, url: tab.url, provider };
+  setSiteAccent(provider.accent);
+  scrapeVisibleBtn.style.display = "";
+  primaryHint.textContent = "Runs in the background";
+  composeProviderLabel.style.display = "none";
+  composeProvider.value = provider.id;
+
+  // Ask the content script for the open conversation's meta (id + title).
+  let chatTitle = "";
+  try {
+    const resp = (await browser.tabs.sendMessage(tab.id, { type: "GET_META" })) as
+      | { ok: true; meta: { id: string; title: string; url: string }; hasConversation?: boolean }
+      | { ok: false }
+      | undefined;
+    if (resp && "ok" in resp && resp.ok) {
+      activeChatId = resp.meta.id;
+      activeChatUrl = resp.meta.url;
+      chatTitle = resp.meta.title || "";
+      const existing = (await getChats()).find((c) => c.id === activeChatId);
+      preCount = existing?.turns.length ?? 0;
+      primaryBtn.textContent = existing ? "Update this chat" : "Capture this chat";
+    } else {
+      activeChatId = undefined;
+      activeChatUrl = tab.url;
+      primaryBtn.textContent = "Capture this chat";
+    }
+  } catch {
+    // Content script not loaded yet (page still booting).
+    activeChatId = undefined;
+    activeChatUrl = tab.url;
+    primaryBtn.textContent = "Capture this chat";
+  }
+
+  ctxTitle.textContent = `${provider.glyph}  ${provider.label}`;
+  ctxSub.style.whiteSpace = "nowrap";
+  ctxSub.textContent = chatTitle || "Open a conversation to capture it";
+  updateComposerLabel();
+}
+
+function updateComposerLabel(): void {
+  const provId = (active?.provider.id ?? (composeProvider.value as ProviderId)) as ProviderId;
+  const label = sourceLabel(provId);
+  const target = composeTarget.value === "new" ? "new chat" : "current chat";
+  composerTargetLabel.textContent = `→ ${label} · ${target}`;
+  $<HTMLSpanElement>("compose-send-label").textContent = `Send to ${label}`;
+}
+
 // --- live job rendering ----------------------------------------------------
 
 function jobPct(job: ScrapeJob): number {
@@ -60,36 +175,12 @@ function jobPct(job: ScrapeJob): number {
   return Math.min(90, 8 + t * 0.6);
 }
 
-// Active-tab context, used to label the primary button + show capture deltas.
-let activeChatId: string | undefined;
-let preCount = 0;
-
-async function refreshActiveContext(): Promise<void> {
-  const tab = await activeGeminiTab();
-  if (!tab) { activeChatId = undefined; openArchiveChatBtn.textContent = "Open Archive"; return; }
-  try {
-    const resp = (await browser.tabs.sendMessage(tab.id, { type: "GET_META" })) as
-      | { ok: true; meta: { id: string; title: string } } | { ok: false } | undefined;
-    if (resp && "ok" in resp && resp.ok) {
-      activeChatId = resp.meta.id;
-      const existing = (await getChats()).find((c) => c.id === activeChatId);
-      preCount = existing?.turns.length ?? 0;
-      openArchiveChatBtn.textContent = existing ? "Update this chat in Archive" : "Open this chat in Archive";
-      scrapeFullBtn.textContent = existing ? "Update full chat" : "Capture full chat";
-      return;
-    }
-  } catch {
-    /* content script not loaded yet */
-  }
-  openArchiveChatBtn.textContent = "Open this chat in Archive";
-}
-
 async function renderJob(): Promise<void> {
   const jobs = await getJobs();
-  const active = jobs.find((j) => j.status === "scraping");
+  const activeJob = jobs.find((j) => j.status === "scraping");
   const recent = jobs.find((j) => j.status !== "scraping");
-  const job = active || recent;
-  if (!job || (!active && job.finishedAt && Date.now() - Date.parse(job.finishedAt) > 25_000)) {
+  const job = activeJob || recent;
+  if (!job || (!activeJob && job.finishedAt && Date.now() - Date.parse(job.finishedAt) > 25_000)) {
     jobEl.hidden = true;
     return;
   }
@@ -97,6 +188,7 @@ async function renderJob(): Promise<void> {
   const isErr = job.status === "error" || job.status === "canceled";
   jobEl.className = "job" + (isErr ? " err" : "");
   const delta = job.chatId === activeChatId && preCount > 0 ? job.turns - preCount : 0;
+  const label = sourceLabel(job.source);
   const msg =
     job.status === "scraping"
       ? `Capturing… ${job.turns} turn${job.turns === 1 ? "" : "s"}${job.loading ? " · loading older" : job.atTop ? " · finishing" : ""}`
@@ -106,7 +198,7 @@ async function renderJob(): Promise<void> {
   jobEl.innerHTML = `
     ${job.status === "scraping" ? '<div class="spin"></div>' : isErr ? "✕" : "✓"}
     <div class="grow">
-      <div class="jt" title="${escapeAttr(job.title)}">${escapeHtml(job.title || "Gemini chat")}</div>
+      <div class="jt" title="${escapeAttr(job.title)}">${escapeHtml(job.title || `${label} chat`)}</div>
       <div class="jm">${escapeHtml(msg)}</div>
       ${job.status === "scraping" ? `<div class="track"><div class="fill" style="width:${jobPct(job)}%"></div></div>` : ""}
     </div>
@@ -119,6 +211,14 @@ async function renderJob(): Promise<void> {
 }
 
 // --- collection list -------------------------------------------------------
+
+function sourceBadge(source: ProviderId | undefined): string {
+  const id = (source || "gemini") as ProviderId;
+  const label = sourceLabel(id);
+  const color = sourceAccent(id);
+  const glyph = providerById(id)?.glyph ?? "";
+  return `<span class="src-badge" style="color:${color};border-color:${color}55">${escapeHtml(glyph)} ${escapeHtml(label)}</span>`;
+}
 
 async function render() {
   const chats = await getChats();
@@ -135,7 +235,7 @@ async function render() {
     li.innerHTML = `
       <div class="meta">
         <div class="title" data-open="${escapeAttr(chat.id)}" title="${escapeAttr(chat.title)}">${escapeHtml(chat.title)}</div>
-        <div class="turns">${chat.turns.length} Q&A · ${chat.scrapedAt.slice(0, 10)}</div>
+        <div class="turns">${sourceBadge(chat.source)}<span>${chat.turns.length} Q&A · ${chat.scrapedAt.slice(0, 10)}</span></div>
       </div>
       <button class="epub" data-i="${i}" title="Export EPUB">EPUB</button>
       <button class="md" data-i="${i}" title="Export Markdown">MD</button>
@@ -146,7 +246,6 @@ async function render() {
   listEl.querySelectorAll<HTMLElement>(".title[data-open]").forEach((el) =>
     el.addEventListener("click", () => void openArchive(`#/chat/${encodeURIComponent(el.dataset.open!)}`)),
   );
-
   listEl.querySelectorAll<HTMLButtonElement>("button.epub").forEach((b) =>
     b.addEventListener("click", async () => {
       const chat = (await getChats())[Number(b.dataset.i)];
@@ -156,7 +255,6 @@ async function render() {
       setStatus("EPUB downloaded.", "ok");
     }),
   );
-
   listEl.querySelectorAll<HTMLButtonElement>("button.md").forEach((b) =>
     b.addEventListener("click", async () => {
       const chat = (await getChats())[Number(b.dataset.i)];
@@ -165,7 +263,6 @@ async function render() {
       setStatus("Markdown downloaded.", "ok");
     }),
   );
-
   listEl.querySelectorAll<HTMLButtonElement>("button.remove").forEach((b) =>
     b.addEventListener("click", async () => {
       const all = await getChats();
@@ -205,74 +302,59 @@ async function syncToWebapp(chats: Chat[], force = false): Promise<string> {
   }
 }
 
-// --- actions ---------------------------------------------------------------
+// --- capture ---------------------------------------------------------------
 
-async function activeGeminiTab(): Promise<{ id: number; url: string } | null> {
-  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id || !tab.url?.includes("gemini.google.com")) return null;
-  return { id: tab.id, url: tab.url };
-}
-
-/** Start a persisted background capture in the active Gemini tab. */
 async function startCapture(): Promise<{ ok: boolean; chatId?: string; error?: string }> {
-  const tab = await activeGeminiTab();
-  if (!tab) return { ok: false, error: "Open a Gemini chat tab first." };
+  if (!active) return { ok: false, error: "unsupported" };
   const s = await getSettings();
   try {
-    const resp = (await browser.tabs.sendMessage(tab.id, {
+    const resp = (await browser.tabs.sendMessage(active.tabId, {
       type: "START_SCRAPE",
       opts: { scrollDelayMs: s.scrollDelayMs, maxIterations: s.maxIterations },
     })) as { ok: boolean; jobId?: string; chatId?: string; error?: string } | undefined;
     if (!resp?.ok) return { ok: false, error: resp?.error || "Could not start the capture." };
     return { ok: true, chatId: resp.chatId };
   } catch {
-    return { ok: false, error: "Reload the Gemini tab so the content script loads, then retry." };
+    return { ok: false, error: `Reload the ${active.provider.label} tab so the content script loads, then retry.` };
   }
 }
 
-openArchiveChatBtn.addEventListener("click", async () => {
+primaryBtn.addEventListener("click", async () => {
+  if (!active) {
+    await openArchive("#/search");
+    return;
+  }
   setStatus("Starting capture…");
   const res = await startCapture();
   if (!res.ok) {
-    // Not on a Gemini tab (or failed) — still open the archive so the user can browse.
-    if (res.error?.includes("Gemini")) {
-      setStatus("Opening Archive…");
-      await openArchive("#/search");
-      return;
-    }
     setStatus(res.error || "Could not start.", "err");
     return;
   }
   await renderJob();
-  setStatus("Capturing in the background — opening Archive…", "ok");
+  setStatus(`Capturing ${active.provider.label} in the background — opening Archive…`, "ok");
   await openArchive(res.chatId ? `#/chat/${encodeURIComponent(res.chatId)}` : "#/search");
 });
 
-scrapeFullBtn.addEventListener("click", async () => {
-  scrapeFullBtn.disabled = true;
-  setStatus("Starting background capture…");
-  const res = await startCapture();
-  setStatus(res.ok ? "Capturing in the background. You can close this popup." : res.error || "Failed.", res.ok ? "ok" : "err");
-  await renderJob();
-  scrapeFullBtn.disabled = false;
-});
-
-scrapeBtn.addEventListener("click", async () => {
-  scrapeBtn.disabled = true;
+scrapeVisibleBtn.addEventListener("click", async () => {
+  if (!active) return;
+  scrapeVisibleBtn.disabled = true;
   setStatus("Capturing visible turns…");
   try {
-    const tab = await activeGeminiTab();
-    if (!tab) { setStatus("Open a Gemini chat tab first.", "err"); return; }
-    const resp = (await browser.tabs.sendMessage(tab.id, { type: "SCRAPE_CHAT" })) as
-      | { ok: true; chat: Chat } | { ok: false; error: string } | undefined;
-    if (!resp?.ok) { setStatus(resp?.error || "Could not capture this page.", "err"); return; }
+    const resp = (await browser.tabs.sendMessage(active.tabId, { type: "SCRAPE_CHAT" })) as
+      | { ok: true; chat: Chat }
+      | { ok: false; error: string }
+      | undefined;
+    if (!resp?.ok) {
+      setStatus(resp?.error || "Could not capture this page.", "err");
+      return;
+    }
     await render();
     const sync = await syncToWebapp([resp.chat]);
     setStatus(`Saved “${resp.chat.title}” (${resp.chat.turns.length} Q&A).` + sync, "ok");
   } catch {
-    setStatus("Reload the Gemini tab so the content script loads, then retry.", "err");
+    setStatus(`Reload the ${active.provider.label} tab so the content script loads, then retry.`, "err");
   } finally {
-    scrapeBtn.disabled = false;
+    scrapeVisibleBtn.disabled = false;
   }
 });
 
@@ -283,21 +365,18 @@ $<HTMLButtonElement>("export-epub").addEventListener("click", async () => {
   await exportEpub(chats);
   setStatus("EPUB downloaded.", "ok");
 });
-
 $<HTMLButtonElement>("export-md").addEventListener("click", async () => {
   const chats = await getChats();
   if (!chats.length) return;
   exportMarkdown(chats);
   setStatus("Markdown downloaded.", "ok");
 });
-
 $<HTMLButtonElement>("export-json").addEventListener("click", async () => {
   const chats = await getChats();
   if (!chats.length) return;
   exportJson(chats);
   setStatus("JSON downloaded — import it in the web app or Archive.", "ok");
 });
-
 $<HTMLButtonElement>("sync-all").addEventListener("click", async () => {
   const chats = await getChats();
   if (!chats.length) return;
@@ -312,40 +391,36 @@ clearBtn.addEventListener("click", async () => {
   setStatus("Collection cleared.");
 });
 
-// --- composer: send a new message into Gemini ------------------------------
+// --- composer: send a message ----------------------------------------------
 
 const composeText = $<HTMLTextAreaElement>("compose-text");
 const composeSend = $<HTMLButtonElement>("compose-send");
-const composeTarget = $<HTMLSelectElement>("compose-target");
+
+composeTarget.addEventListener("change", updateComposerLabel);
+composeProvider.addEventListener("change", updateComposerLabel);
 
 async function sendComposed(): Promise<void> {
   const text = composeText.value.trim();
-  if (!text) { composeText.focus(); return; }
+  if (!text) {
+    composeText.focus();
+    return;
+  }
   composeSend.disabled = true;
-  setStatus("Sending to Gemini…");
+  const provId = (active?.provider.id ?? (composeProvider.value as ProviderId)) as ProviderId;
+  const label = sourceLabel(provId);
+  setStatus(`Sending to ${label}…`);
   try {
-    // "current" continues the active chat when we're on one (or the most recent
-    // Gemini tab); "new" always opens a fresh conversation.
-    const wantNew = composeTarget.value === "new";
-    const tab = await activeGeminiTab();
-    let convId: string | undefined;
-    let url: string | undefined = "https://gemini.google.com/app";
-    if (!wantNew && tab) {
-      try {
-        const resp = (await browser.tabs.sendMessage(tab.id, { type: "GET_META" })) as
-          | { ok: true; meta: { id: string; url: string } } | { ok: false } | undefined;
-        if (resp && "ok" in resp && resp.ok) { convId = resp.meta.id; url = resp.meta.url; }
-      } catch { /* content script not ready; fall back to a new chat */ }
-    }
+    const wantNew = composeTarget.value === "new" || !active;
     const res = (await browser.runtime.sendMessage({
-      type: "SEND_TO_GEMINI",
+      type: "SEND_TO_CHAT",
+      provider: provId,
       text,
-      convId: wantNew ? undefined : convId,
-      url: wantNew ? "https://gemini.google.com/app" : url,
+      convId: wantNew ? undefined : activeChatId,
+      url: wantNew ? undefined : activeChatUrl,
     })) as { ok: boolean; error?: string } | undefined;
     if (res?.ok) {
       composeText.value = "";
-      setStatus("Sent. Gemini is answering — it'll be mirrored into your archive.", "ok");
+      setStatus(`Sent. ${label} is answering — it'll be mirrored into your archive.`, "ok");
     } else {
       setStatus(res?.error || "Couldn't send the message.", "err");
     }
@@ -365,6 +440,7 @@ composeText.addEventListener("keydown", (e) => {
 });
 
 $<HTMLButtonElement>("open-archive").addEventListener("click", () => void openArchive("#/search"));
+$<HTMLButtonElement>("open-archive-top").addEventListener("click", () => void openArchive("#/search"));
 $<HTMLButtonElement>("open-options").addEventListener("click", () => void openArchive("#/settings"));
 $<HTMLButtonElement>("open-webapp").addEventListener("click", async () => {
   const s = await getSettings();
@@ -374,7 +450,10 @@ $<HTMLButtonElement>("open-webapp").addEventListener("click", async () => {
 // Live updates while the popup is open.
 browser.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  if (changes.collected_chats) { void render(); void refreshActiveContext(); }
+  if (changes.collected_chats) {
+    void render();
+    void refreshActiveContext();
+  }
   if (changes.scrape_jobs) void renderJob();
 });
 

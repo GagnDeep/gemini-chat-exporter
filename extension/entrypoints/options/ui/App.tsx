@@ -174,7 +174,7 @@ export function App() {
   return (
     <div className="app">
       <nav className="rail">
-        <div className="rail-logo" title="Gemini Chat Archive"><I.Sparkle size={18} /></div>
+        <div className="rail-logo" title="AI Chat Archive"><I.Sparkle size={18} /></div>
         <button className="rail-btn" title="New search"
           onClick={() => { navigate("#/search"); window.dispatchEvent(new Event("focus-search")); }}>
           <I.Plus />
@@ -183,7 +183,7 @@ export function App() {
           aria-pressed={navOpen} onClick={() => setNavOpen((o) => !o)}>
           <I.PanelLeft />
         </button>
-        <button className={"rail-btn" + (route.view === "compose" ? " active" : "")} title="Chat — send a message to Gemini"
+        <button className={"rail-btn" + (route.view === "compose" ? " active" : "")} title="Chat — send a message"
           onClick={() => navigate("#/compose")}>
           <I.Msg />
         </button>

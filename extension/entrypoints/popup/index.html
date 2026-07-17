@@ -3,59 +3,87 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Gemini Chat Archive</title>
+    <title>AI Chat Archive</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <header>
       <div class="logo">✦</div>
-      <div>
-        <h1>Gemini Chat Archive</h1>
-        <p class="sub">Capture · Search · Export</p>
+      <div class="head-text">
+        <h1>AI Chat Archive</h1>
+        <p class="sub">Gemini · Claude · ChatGPT</p>
       </div>
+      <button id="open-archive-top" class="chip-btn" title="Open the archive">Archive ↗</button>
     </header>
 
     <main>
-      <section id="composer" class="composer">
-        <div class="composer-head">
-          <h2>Send a message</h2>
-          <label class="composer-target">
-            <select id="compose-target">
-              <option value="current">Continue current chat</option>
-              <option value="new">Start a new chat</option>
-            </select>
-          </label>
+      <!-- Active-tab context: which service + which chat you're on -->
+      <section id="context" class="context">
+        <span class="ctx-dot" id="ctx-dot"></span>
+        <div class="ctx-text">
+          <div class="ctx-title" id="ctx-title">Checking this tab…</div>
+          <div class="ctx-sub" id="ctx-sub"></div>
         </div>
-        <textarea id="compose-text" rows="2" placeholder="Message Gemini… (Enter to send, Shift+Enter for newline)"></textarea>
-        <button id="compose-send" class="primary">
-          <span>Send to Gemini</span>
-        </button>
       </section>
 
-      <button id="open-archive-chat" class="primary">Open this chat in Archive</button>
-
-      <div class="row2">
-        <button id="scrape-full" class="secondary">Capture full chat</button>
-        <button id="scrape" class="secondary">Capture visible</button>
+      <!-- Adaptive primary action -->
+      <button id="primary" class="primary">Capture this chat</button>
+      <div class="under-primary">
+        <button id="scrape-visible" class="ghost" title="Capture only what's on screen (no auto-scroll)">Capture visible only</button>
+        <span class="grow"></span>
+        <span class="hint" id="primary-hint">Runs in the background</span>
       </div>
 
       <div id="job" class="job" hidden></div>
       <p id="status" class="status"></p>
 
+      <!-- Send a message into the live chat (collapsible) -->
+      <details id="composer" class="composer">
+        <summary>
+          <span>✏️ Send a message</span>
+          <span class="composer-target-label" id="composer-target-label"></span>
+        </summary>
+        <div class="composer-body">
+          <div class="composer-controls">
+            <label class="sel">
+              <span>To</span>
+              <select id="compose-provider">
+                <option value="gemini">Gemini</option>
+                <option value="claude">Claude</option>
+                <option value="chatgpt">ChatGPT</option>
+              </select>
+            </label>
+            <label class="sel">
+              <span>Chat</span>
+              <select id="compose-target">
+                <option value="current">Current chat</option>
+                <option value="new">New chat</option>
+              </select>
+            </label>
+          </div>
+          <textarea id="compose-text" rows="2" placeholder="Type a message… (Enter to send, Shift+Enter for a newline)"></textarea>
+          <button id="compose-send" class="primary sm"><span id="compose-send-label">Send</span></button>
+        </div>
+      </details>
+
+      <!-- Saved collection -->
       <section id="collection">
         <div class="collection-head">
-          <h2>Collected chats (<span id="count">0</span>)</h2>
+          <h2>Saved chats (<span id="count">0</span>)</h2>
           <button id="clear" class="link" hidden>Clear all</button>
         </div>
         <ul id="list" class="list"></ul>
-        <p id="empty" class="empty">No chats yet. Open a Gemini conversation and click “Open this chat in Archive” (or press Alt+Shift+G to capture in the background).</p>
+        <p id="empty" class="empty">
+          No chats saved yet. Open a conversation on <b>Gemini</b>, <b>Claude</b>, or <b>ChatGPT</b>
+          and click <b>Capture this chat</b> — or just keep chatting and it's mirrored in automatically.
+        </p>
       </section>
 
       <div class="actions actions-grid" id="bulk-actions" hidden>
         <button id="export-epub" class="secondary">Export all EPUB</button>
         <button id="export-md" class="secondary">Export Markdown</button>
         <button id="export-json" class="secondary">Export JSON</button>
-        <button id="sync-all" class="secondary">Sync all to web app</button>
+        <button id="sync-all" class="secondary">Sync to web app</button>
       </div>
 
       <div class="footer">

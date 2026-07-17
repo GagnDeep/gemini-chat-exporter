@@ -1,18 +1,20 @@
 // Background service worker.
-//   • Keeps the toolbar badge in sync with the collected-chats count, and shows
-//     a live indicator while a capture is running.
-//   • Right-click menu + keyboard command start a *persisted* background scrape
-//     (the content script owns the capture + persistence, so it survives the SW
-//     being evicted).
+//   • Keeps the toolbar badge in sync with the collected-chats count, and shows a
+//     live indicator while a capture is running.
+//   • Right-click menu + keyboard command start a *persisted* background scrape on
+//     any supported site (Gemini, Claude, ChatGPT). The content script owns the
+//     capture + persistence, so it survives the SW being evicted.
 //   • Tells content scripts which tab they live in (WHICH_TAB).
+//   • "Send a message" routes the prompt to the right site's tab (SEND_TO_CHAT).
 //   • Syncs freshly-finished chats into the companion web app when enabled.
 
 import type { Chat, ScrapeJob } from "@/lib/types";
 import { getSettings } from "@/lib/settings";
 import { getChats, CHATS_KEY } from "@/lib/chats-store";
 import { JOBS_KEY, getJobs, reconcileStalled } from "@/lib/jobs";
+import { providerForUrl, providerById, ALL_MATCHES, type Provider, type ProviderId } from "@/lib/providers";
 
-const MENU_ID = "scrape-full-chat";
+const MENU_ID = "capture-chat";
 
 async function updateBadge(): Promise<void> {
   try {
@@ -43,20 +45,16 @@ async function syncToWebapp(chat: Chat): Promise<void> {
       await new Promise((r) => setTimeout(r, 1500));
     }
     if (tab?.id) {
-      await browser.tabs.sendMessage(tab.id, {
-        type: "SYNC_TO_WEBAPP",
-        chats: [chat],
-        mode: settings.mergeMode,
-      });
+      await browser.tabs.sendMessage(tab.id, { type: "SYNC_TO_WEBAPP", chats: [chat], mode: settings.mergeMode });
     }
   } catch {
     /* ignore — the popup surfaces sync errors interactively */
   }
 }
 
-/** Kick off a persisted scrape in a Gemini tab (used by menu + command). */
+/** Kick off a persisted scrape in a supported tab (used by menu + command). */
 async function startScrapeInTab(tabId: number, tabUrl?: string): Promise<void> {
-  if (!tabUrl?.includes("gemini.google.com")) {
+  if (!providerForUrl(tabUrl)) {
     await flashBadge("!");
     return;
   }
@@ -84,7 +82,6 @@ async function flashBadge(text: string): Promise<void> {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Wait (bounded) for a tab to finish loading before we message its content script. */
 async function waitForTabComplete(tabId: number, timeoutMs: number): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -98,10 +95,6 @@ async function waitForTabComplete(tabId: number, timeoutMs: number): Promise<voi
   }
 }
 
-/**
- * Ask a Gemini tab's content script to type + submit a prompt, retrying while the
- * content script (or the SPA it drives) is still coming up on a fresh tab.
- */
 async function sendPromptToTab(tabId: number, text: string): Promise<{ ok: boolean; error?: string }> {
   let lastErr = "";
   for (let i = 0; i < 30; i++) {
@@ -115,32 +108,51 @@ async function sendPromptToTab(tabId: number, text: string): Promise<{ ok: boole
     }
     await sleep(500);
   }
-  return { ok: false, error: lastErr || "The Gemini page didn't respond in time." };
+  return { ok: false, error: lastErr || "The page didn't respond in time." };
 }
 
+const NEW_CHAT_URL: Record<ProviderId, string> = {
+  gemini: "https://gemini.google.com/app",
+  claude: "https://claude.ai/new",
+  chatgpt: "https://chatgpt.com/",
+};
+
 /**
- * Continue an archived conversation live: focus (or open) its Gemini tab and
- * submit `text` into the composer. Reuses an existing tab already on that
- * conversation when one is open, so we never spawn duplicates.
+ * Continue (or start) a conversation live: focus/open the right site's tab and
+ * submit `text` into its composer. Reuses a tab already on that conversation when
+ * one is open, so we never spawn duplicates.
  */
-async function sendToGemini(args: { url?: string; convId?: string; text: string }): Promise<{ ok: boolean; error?: string }> {
+async function sendToChat(args: {
+  provider?: ProviderId;
+  url?: string;
+  convId?: string;
+  text: string;
+}): Promise<{ ok: boolean; error?: string }> {
   const text = (args.text || "").trim();
   if (!text) return { ok: false, error: "Nothing to send." };
+
+  const prov: Provider | null = providerById(args.provider) ?? providerForUrl(args.url);
+  if (!prov) return { ok: false, error: "Couldn't tell which chat service to send to." };
+
   try {
-    const tabs = await browser.tabs.query({ url: "https://gemini.google.com/*" });
+    const tabs = (await Promise.all(prov.matches.map((m) => browser.tabs.query({ url: m })))).flat();
     let tab = args.convId ? tabs.find((t) => t.url && t.url.includes(args.convId!)) : undefined;
     let freshlyOpened = false;
 
     if (tab?.id != null) {
       await browser.tabs.update(tab.id, { active: true });
       if (tab.windowId != null) {
-        try { await browser.windows.update(tab.windowId, { focused: true }); } catch { /* single-window */ }
+        try {
+          await browser.windows.update(tab.windowId, { focused: true });
+        } catch {
+          /* single-window */
+        }
       }
     } else {
-      tab = await browser.tabs.create({ url: args.url || "https://gemini.google.com/app", active: true });
+      tab = await browser.tabs.create({ url: args.url || NEW_CHAT_URL[prov.id], active: true });
       freshlyOpened = true;
     }
-    if (tab?.id == null) return { ok: false, error: "Couldn't open a Gemini tab." };
+    if (tab?.id == null) return { ok: false, error: `Couldn't open a ${prov.label} tab.` };
 
     await waitForTabComplete(tab.id, freshlyOpened ? 25_000 : 8_000);
     return await sendPromptToTab(tab.id, text);
@@ -165,16 +177,14 @@ async function onJobsChanged(jobs: ScrapeJob[]): Promise<void> {
 export default defineBackground(() => {
   browser.runtime.onInstalled.addListener((details) => {
     if (details.reason === "install") {
-      console.log(
-        "[Gemini Chat Exporter] installed. Open a chat on gemini.google.com and click the toolbar icon.",
-      );
+      console.log("[AI Chat Exporter] installed. Open a chat on Gemini, Claude, or ChatGPT and click the toolbar icon.");
     }
     try {
       browser.contextMenus.create({
         id: MENU_ID,
-        title: "Capture this Gemini chat (full)",
+        title: "Capture this chat (full)",
         contexts: ["page"],
-        documentUrlPatterns: ["https://gemini.google.com/*"],
+        documentUrlPatterns: ALL_MATCHES,
       });
     } catch {
       /* contextMenus may not be granted in all builds */
@@ -188,22 +198,21 @@ export default defineBackground(() => {
     void updateBadge();
   });
 
-  // Reply to content scripts asking which tab they're in.
   browser.runtime.onMessage.addListener(
-    (msg: { type?: string; url?: string; convId?: string; text?: string }, sender, sendResponse) => {
+    (msg: { type?: string; provider?: ProviderId; url?: string; convId?: string; text?: string }, sender, sendResponse) => {
       if (msg?.type === "WHICH_TAB") {
         sendResponse({ tabId: sender.tab?.id });
         return; // synchronous
       }
-      if (msg?.type === "SEND_TO_GEMINI") {
-        sendToGemini({ url: msg.url, convId: msg.convId, text: msg.text ?? "" }).then(sendResponse);
+      // SEND_TO_CHAT is the multi-provider path; SEND_TO_GEMINI kept as an alias.
+      if (msg?.type === "SEND_TO_CHAT" || msg?.type === "SEND_TO_GEMINI") {
+        sendToChat({ provider: msg.provider, url: msg.url, convId: msg.convId, text: msg.text ?? "" }).then(sendResponse);
         return true; // async
       }
       return false;
     },
   );
 
-  // Keep the badge in sync and react to job completions.
   browser.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
     if (changes[CHATS_KEY] || changes[JOBS_KEY]) void updateBadge();

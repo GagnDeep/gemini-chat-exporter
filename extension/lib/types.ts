@@ -1,31 +1,37 @@
-// Shared data model for scraped Gemini conversations.
+// Shared data model for scraped conversations.
 // This same shape is exported as JSON by the extension and imported by the web app.
+
+import type { ProviderId } from "./providers";
 
 export interface ChatTurn {
   /** Zero-based position of this Q&A pair within the conversation. */
   index: number;
   /**
-   * Stable per-turn key, derived from the turn's content (see `turnKey` in
-   * scraper.ts). Survives index shifts so the web app can merge incrementally
-   * when an older turn surfaces in a later scrape. Optional for backward compat
-   * with exports made before this field existed.
+   * Stable per-turn key, derived from the turn's content (see scraper.ts).
+   * Survives index shifts so merges stay anchored. Optional for backward compat.
    */
   key?: string;
   /** The user's prompt / question. */
   question: string;
-  /** Gemini's answer as plain text (used for search + previews). */
+  /** The model's answer as plain text (used for search + previews). */
   answerText: string;
-  /** Gemini's answer as sanitized HTML (used for rich rendering + EPUB). */
+  /** The model's answer as sanitized HTML (used for rich rendering + EPUB). */
   answerHtml: string;
 }
 
 export interface Chat {
-  /** Stable id derived from the Gemini conversation URL. */
+  /** Stable id derived from the conversation URL (namespaced by source). */
   id: string;
   /** Conversation title (from the page <title>). */
   title: string;
   /** Full URL the chat was scraped from. */
   url: string;
+  /**
+   * Which AI product this chat came from ("gemini" | "claude" | "chatgpt").
+   * Optional for backward compat with archives captured before multi-provider
+   * support (those are Gemini by definition).
+   */
+  source?: ProviderId;
   /** ISO timestamp of when the scrape happened. */
   scrapedAt: string;
   /** The ordered Q&A pairs. */
@@ -45,29 +51,21 @@ export const EXPORT_VERSION = 1 as const;
 
 // ---------------------------------------------------------------------------
 // Background scrape jobs
-//
-// A scrape job is a *persisted* record of an in-flight (or finished) capture.
-// It lives in browser.storage.local so it survives the popup closing and the
-// service worker being evicted — the content script that owns the capture writes
-// progress and the final result straight to storage, and every UI surface
-// (popup, archive page) renders from that single source of truth.
 // ---------------------------------------------------------------------------
 
-export type ScrapeJobStatus =
-  | "scraping" // actively capturing
-  | "done" // finished, chat committed to the collection
-  | "error" // failed
-  | "canceled"; // user stopped, or tab/navigation interrupted it
+export type ScrapeJobStatus = "scraping" | "done" | "error" | "canceled";
 
 export interface ScrapeJob {
   /** Unique job id. */
   id: string;
-  /** Gemini conversation id (matches Chat.id) once known. */
+  /** Conversation id (matches Chat.id) once known. */
   chatId: string;
   /** Best-known title for display. */
   title: string;
   /** URL the capture is running against. */
   url: string;
+  /** Which product this capture belongs to. */
+  source?: ProviderId;
   /** Tab the capture is running in (best-effort; tabs can close). */
   tabId?: number;
   status: ScrapeJobStatus;
@@ -97,6 +95,8 @@ export interface Segment {
   id: string;
   chatId: string;
   chatTitle: string;
+  /** Source product of the owning chat (for badges + filtering). */
+  source?: ProviderId;
   turnIndex: number;
   question: string;
   answerText: string;
@@ -118,12 +118,7 @@ export interface SearchHit {
   score: number;
   /** Short snippet around the match for display. */
   snippet: string;
-  /**
-   * Surface words the ranker actually hit (BM25 matched tokens, Fuse match
-   * words, or the query's salient terms for semantic hits). Optional so nothing
-   * that builds a SearchHit by hand breaks. Drives the arrival highlight so the
-   * destination marks exactly what matched — even for semantic hits.
-   */
+  /** Surface words the ranker actually hit (drives arrival highlighting). */
   matchedTerms?: string[];
   /** Which field the strongest match landed in, when known. */
   field?: "question" | "answer";

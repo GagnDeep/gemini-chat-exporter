@@ -1,10 +1,11 @@
-# Gemini Chat Exporter + Archive
+# AI Chat Exporter + Archive
 
-Two-part toolkit for capturing your Google Gemini conversations and making them
-readable, searchable, and portable.
+Two-part toolkit for capturing your **Gemini**, **Claude**, and **ChatGPT**
+conversations and making them readable, searchable, and portable. One private,
+local archive across all three assistants.
 
 1. **`extension/`** — a [WXT](https://wxt.dev) Chrome/Firefox extension that captures
-   the conversation open in your Gemini tab into a **built-in, Gemini-style archive
+   the conversation open in your Gemini, Claude, or ChatGPT tab into a **built-in archive
    page** with best-in-class **search** (keyword · fuzzy · on-device semantic ·
    smart **hybrid**), and exports to **EPUB**, **Markdown**, or **JSON**. Captures run
    as **persisted background jobs** that survive closing the popup or the service
@@ -109,7 +110,15 @@ folder), and click the **↻ reload** button on the extension's card in
   shows how many new turns a re-capture added.
 - **Appearance** — dark / light / match-system theme and a compact density.
 
-### How it scrapes
+### How it captures (multi-provider)
+Each supported site is described by a data-driven **provider profile** in
+`extension/lib/providers.ts` (URL patterns, DOM selectors, composer/send targets,
+how a "turn" is laid out). A single generic engine (`extension/lib/scraper.ts`)
+drives capture for all of them, so adding another assistant later is "add one
+profile", not "fork the engine". Every chat is tagged with its `source`
+(gemini / claude / chatgpt), shown as a badge in the archive + popup.
+
+### How it scrapes Gemini
 Gemini renders each turn as a `.conversation-container` holding a `<user-query>`
 and a `<model-response>`. Selectors live in `lib/scraper.ts` as ordered fallback
 lists, so a single class-name change on Google's side won't break extraction

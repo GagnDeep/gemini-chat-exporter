@@ -10,6 +10,7 @@ export function segmentsFromChats(chats: Chat[]): Segment[] {
         id: `${chat.id}#${t.index}`,
         chatId: chat.id,
         chatTitle: chat.title,
+        source: chat.source,
         turnIndex: t.index,
         question: t.question,
         answerText: t.answerText,
@@ -56,7 +57,7 @@ export function relativeTime(iso: string): string {
   return new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
-/** Short calendar date like "28 Jun" (matches Gemini's list dates). */
+/** Short calendar date like "28 Jun". */
 export function shortDate(iso: string): string {
   const t = Date.parse(iso);
   if (!Number.isFinite(t)) return "";

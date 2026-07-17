@@ -5,6 +5,7 @@
 // The content script that runs the capture is the writer; everyone else reads.
 
 import type { ScrapeJob, ScrapeJobStatus } from "./types";
+import type { ProviderId } from "./providers";
 
 export const JOBS_KEY = "scrape_jobs";
 
@@ -46,6 +47,7 @@ export async function startJob(init: {
   title: string;
   url: string;
   tabId?: number;
+  source?: ProviderId;
 }): Promise<ScrapeJob> {
   const jobs = prune(await getJobs()).filter((j) => j.chatId !== init.chatId);
   const job: ScrapeJob = {

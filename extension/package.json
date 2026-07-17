@@ -2,7 +2,7 @@
   "name": "gemini-chat-exporter",
   "description": "Scrape Google Gemini conversations and export them as EPUB or JSON.",
   "private": true,
-  "version": "1.4.0",
+  "version": "1.5.0",
   "type": "module",
   "scripts": {
     "dev": "node scripts/copy-ort.mjs && wxt",

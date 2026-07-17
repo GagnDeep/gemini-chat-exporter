@@ -1,10 +1,36 @@
 import React, { useMemo, useState } from "react";
 import { displayTitle } from "@/lib/meta";
+import type { Chat } from "@/lib/types";
+import { providerById } from "@/lib/providers";
 import { useChats, useChatMeta } from "./store";
 import { shortDate } from "./segments";
 import { navigate, chatLink } from "./App";
 import { ResizeHandle } from "./resize";
 import * as I from "./icons";
+
+/** Small colored source badge (Gemini / Claude / ChatGPT). */
+function SourceBadge({ source }: { source?: string }) {
+  const p = providerById(source);
+  if (!p) return null;
+  return (
+    <span
+      className="cn-src"
+      title={p.label}
+      style={{
+        color: p.accent,
+        border: `1px solid ${p.accent}55`,
+        borderRadius: 6,
+        padding: "0 5px",
+        fontSize: 10,
+        lineHeight: "15px",
+        fontWeight: 600,
+        letterSpacing: ".02em",
+      }}
+    >
+      {p.glyph} {p.label}
+    </span>
+  );
+}
 
 /** Collapsible, resizable chat-switcher sidebar (lives in App, beside the rail).
  *  Lists pinned + recent chats with a quick filter; clicking opens that chat. */
@@ -38,13 +64,16 @@ export function ChatNav({
 
   const open = (id: string) => navigate(chatLink(id));
 
-  const Row = (c: { id: string; title: string; scrapedAt: string; turns: { length: number } }, isPinned: boolean) => (
+  const Row = (c: Chat, isPinned: boolean) => (
     <button key={c.id} className={"cn-row" + (c.id === activeChatId ? " on" : "")}
       onClick={() => open(c.id)} title={displayTitle(meta, c.id, c.title)}>
       <span className="cn-ic">{isPinned ? <I.Pin size={15} /> : <I.Msg size={15} />}</span>
       <span className="cn-body">
         <span className="cn-title">{displayTitle(meta, c.id, c.title)}</span>
-        <span className="cn-sub">{c.turns.length} Q&amp;A · {shortDate(c.scrapedAt)}</span>
+        <span className="cn-sub" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <SourceBadge source={c.source} />
+          <span>{c.turns.length} Q&amp;A · {shortDate(c.scrapedAt)}</span>
+        </span>
       </span>
     </button>
   );
